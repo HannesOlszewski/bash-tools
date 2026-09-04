@@ -391,13 +391,23 @@ impl Daemon {
     fn debug(&mut self, msg: &str) {
         if let Some(f) = &mut self.log {
             use std::io::Write;
-            let _ = writeln!(f, "{:?} {}", Instant::now(), msg);
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let _ = writeln!(f, "{}.{:06} {}", t.as_secs() % 1000, t.subsec_micros(), msg);
         }
     }
 
     fn main_loop(&mut self) {
         while let Some(t) = self.chan.field() {
             let ty = t.first().copied().unwrap_or(0);
+            if !self.dispatch(ty) {
+                return;
+            }
+        }
+    }
+
+    /// Handle one message; returns false on `x` (exit).
+    fn dispatch(&mut self, ty: u8) -> bool {
+        {
             match ty {
                 b'i' => self.on_init(),
                 b'p' => self.on_prompt(),
@@ -433,12 +443,13 @@ impl Daemon {
                     let s = self.chan.field_str().unwrap_or_default();
                     self.rlvars.parse(&s);
                 }
-                b'x' => return,
+                b'x' => return false,
                 _ => {
-                    self.debug(&format!("unknown message {:?}", t));
+                    self.debug(&format!("unknown message {:?}", ty as char));
                 }
             }
         }
+        true
     }
 
     fn reply(&mut self, data: &[u8]) {
@@ -504,7 +515,6 @@ impl Daemon {
     fn on_accept(&mut self) {
         if self.seen_prompt_since_accept {
             // normal: a fresh PS1 prompt (on_prompt already reset state)
-            self.seen_prompt_since_accept = false;
             return;
         }
         // No PROMPT_COMMAND ran: bash asked for a continuation line (PS2).
@@ -528,6 +538,9 @@ impl Daemon {
     }
 
     fn on_line(&mut self, line: String, point: usize, _insert: bool) {
+        if self.log.is_some() {
+            self.debug(&format!("line {:?} point {}", line, point));
+        }
         if let Some(m) = &self.menu {
             if m.line != line || m.point != point {
                 self.menu = None;
@@ -536,6 +549,7 @@ impl Daemon {
         self.line = line;
         self.point = point;
         self.at_prompt = true;
+        self.seen_prompt_since_accept = false;
         self.list_visible = !self.line.is_empty();
         self.frame_valid = false;
         self.compute_frame();
@@ -543,6 +557,9 @@ impl Daemon {
     }
 
     fn on_go(&mut self) {
+        if self.log.is_some() {
+            self.debug("go");
+        }
         let mut ack = b'n';
         if self.at_prompt && !self.line.is_empty() {
             self.compute_frame();
@@ -578,6 +595,7 @@ impl Daemon {
 
     fn on_tab(&mut self, line: String, point: usize, backward: bool) {
         self.at_prompt = true;
+        self.seen_prompt_since_accept = false;
         let reuse = matches!(&self.menu, Some(m) if m.line == line && m.point == point);
         if !reuse {
             self.line = line.clone();
@@ -773,6 +791,7 @@ impl Daemon {
             return;
         }
         let start = Instant::now();
+        let mut polls = 0u32;
         loop {
             if self.chan.pending() {
                 // newer input is waiting; it will trigger its own paint
@@ -782,12 +801,16 @@ impl Daemon {
                 Some(true) | None => break,
                 Some(false) => {}
             }
+            polls += 1;
             if start.elapsed().as_micros() as u64 > SIGNAL_WAIT_US {
                 break;
             }
             sys::nap_us(30);
         }
         sys::kill(self.bash_pid, libc::SIGWINCH);
+        if self.log.is_some() {
+            self.debug(&format!("signal after {}us ({} polls)", start.elapsed().as_micros(), polls));
+        }
     }
 
     // ----- completion -------------------------------------------------------------
@@ -877,13 +900,395 @@ impl Daemon {
 
     fn build_menu(&mut self) -> Option<Menu> {
         let (wstart, word) = complete::current_word(&self.line, self.point);
-        let (cands, match_len) = self.candidates();
+        let (mut cands, match_len) = self.candidates();
+        // Programmable completion for arguments (git, ssh, ...): ask bash.
+        if !self.is_command_position(wstart) {
+            if let Some(cmd) = self.current_command(wstart) {
+                if let Some(extra) = self.compspec_candidates(&cmd, wstart, &word) {
+                    // compspec results replace our file guesses (history stays)
+                    cands.retain(|c| c.whole_line);
+                    let mut merged = extra;
+                    merged.extend(cands);
+                    cands = merged;
+                }
+            }
+        }
         if cands.is_empty() {
             return None;
         }
         let quote = self.line.chars().nth(wstart).filter(|c| *c == '\'' || *c == '"');
         let _ = word;
         Some(Menu { cands, idx: None, line: self.line.clone(), point: self.point, word_start: wstart, quote, match_len })
+    }
+}
+
+/// A parsed `complete -p` line.
+#[derive(Default, Debug)]
+struct Spec {
+    func: Option<String>,
+    wordlist: Option<String>,
+    command: Option<String>,
+    glob: Option<String>,
+    actions: Vec<String>,
+    opts: Vec<String>,
+    prefix: String,
+    suffix: String,
+}
+
+/// Split a line into shell words, honoring quotes (enough for `complete -p`).
+fn shell_words(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = s.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            Some(_) => {
+                if c == '"' {
+                    quote = None;
+                } else if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        if !matches!(n, '"' | '$' | '`' | '\\') {
+                            cur.push('\\');
+                        }
+                        cur.push(n);
+                    }
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => {
+                if c == '\'' || c == '"' {
+                    quote = Some(c);
+                    in_word = true;
+                } else if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                        in_word = true;
+                    }
+                } else if c.is_whitespace() {
+                    if in_word {
+                        out.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                } else {
+                    cur.push(c);
+                    in_word = true;
+                }
+            }
+        }
+    }
+    if in_word {
+        out.push(cur);
+    }
+    out
+}
+
+fn parse_spec(line: &str) -> Option<Spec> {
+    let words = shell_words(line.trim());
+    if words.first().map(|w| w.as_str()) != Some("complete") {
+        return None;
+    }
+    let mut sp = Spec::default();
+    let mut i = 1;
+    while i < words.len() {
+        let w = words[i].as_str();
+        let arg = words.get(i + 1).cloned();
+        match w {
+            "-o" => {
+                if let Some(a) = arg {
+                    sp.opts.push(a);
+                }
+                i += 1;
+            }
+            "-A" => {
+                if let Some(a) = arg {
+                    sp.actions.push(a);
+                }
+                i += 1;
+            }
+            "-F" => {
+                sp.func = arg;
+                i += 1;
+            }
+            "-W" => {
+                sp.wordlist = arg;
+                i += 1;
+            }
+            "-C" => {
+                sp.command = arg;
+                i += 1;
+            }
+            "-G" => {
+                sp.glob = arg;
+                i += 1;
+            }
+            "-P" => {
+                sp.prefix = arg.unwrap_or_default();
+                i += 1;
+            }
+            "-S" => {
+                sp.suffix = arg.unwrap_or_default();
+                i += 1;
+            }
+            "-X" => {
+                i += 1;
+            }
+            "-a" => sp.actions.push("alias".into()),
+            "-b" => sp.actions.push("builtin".into()),
+            "-c" => sp.actions.push("command".into()),
+            "-d" => sp.actions.push("directory".into()),
+            "-e" => sp.actions.push("export".into()),
+            "-f" => sp.actions.push("file".into()),
+            "-g" => sp.actions.push("group".into()),
+            "-j" => sp.actions.push("job".into()),
+            "-k" => sp.actions.push("keyword".into()),
+            "-s" => sp.actions.push("service".into()),
+            "-u" => sp.actions.push("user".into()),
+            "-v" => sp.actions.push("variable".into()),
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(sp)
+}
+
+/// Split a line into `COMP_WORDS` the way bash does: whitespace separates,
+/// other `COMP_WORDBREAKS` characters are words of their own, quoted text
+/// stays together. Returns the words and the index of the word at `point`.
+fn comp_words(line: &str, point: usize) -> (Vec<String>, usize) {
+    let chars: Vec<char> = line.chars().collect();
+    let point = point.min(chars.len());
+    let mut words: Vec<(usize, String)> = Vec::new(); // (start, text)
+    let mut cur = String::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote: Option<char> = None;
+    let mut in_word = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    quote = None;
+                } else if q == '"' && c == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    cur.push(chars[i]);
+                }
+            }
+            None => {
+                if c == '\\' && i + 1 < chars.len() {
+                    if !in_word {
+                        start = i;
+                        in_word = true;
+                    }
+                    cur.push(c);
+                    i += 1;
+                    cur.push(chars[i]);
+                } else if c == '\'' || c == '"' {
+                    if !in_word {
+                        start = i;
+                        in_word = true;
+                    }
+                    quote = Some(c);
+                    cur.push(c);
+                } else if c == ' ' || c == '\t' || c == '\n' {
+                    if in_word {
+                        words.push((start, std::mem::take(&mut cur)));
+                        in_word = false;
+                    }
+                } else if matches!(c, '>' | '<' | '=' | ';' | '|' | '&' | '(' | ':') {
+                    if in_word {
+                        words.push((start, std::mem::take(&mut cur)));
+                        in_word = false;
+                    }
+                    words.push((i, c.to_string()));
+                } else {
+                    if !in_word {
+                        start = i;
+                        in_word = true;
+                    }
+                    cur.push(c);
+                }
+            }
+        }
+        i += 1;
+    }
+    if in_word {
+        words.push((start, cur));
+    }
+    // the word containing point, or a new empty word at point
+    let mut cword = words.len();
+    for (idx, (st, text)) in words.iter().enumerate() {
+        let end = st + text.chars().count();
+        if point >= *st && point <= end {
+            cword = idx;
+            break;
+        }
+    }
+    if cword == words.len() {
+        words.push((point, String::new()));
+    }
+    (words.into_iter().map(|(_, t)| t).collect(), cword)
+}
+
+impl Daemon {
+    /// Ask bash for the compspec of `cmd`, run it, and turn the results
+    /// into candidates. `None` when there is no compspec.
+    fn compspec_candidates(&mut self, cmd: &str, wstart: usize, word: &str) -> Option<Vec<Cand>> {
+        let (words, cword) = comp_words(&self.line, self.point);
+        let mut spec = self.fetch_spec(cmd)?;
+        let mut items: Vec<String> = Vec::new();
+        let mut opts: Vec<String> = spec.opts.clone();
+        for attempt in 0..2 {
+            items.clear();
+            let mut retry = false;
+            let mut parts: Vec<(char, String)> = Vec::new();
+            for a in &spec.actions {
+                parts.push(('A', a.clone()));
+            }
+            if let Some(g) = &spec.glob {
+                parts.push(('G', g.clone()));
+            }
+            if let Some(w) = &spec.wordlist {
+                parts.push(('W', w.clone()));
+            }
+            if let Some(f) = &spec.func {
+                parts.push(('F', f.clone()));
+            }
+            if let Some(c) = &spec.command {
+                parts.push(('C', c.clone()));
+            }
+            if parts.is_empty() {
+                break;
+            }
+            for (kind, arg) in parts {
+                let (status, copts, lines) = self.run_spec_part(kind, &arg, cmd, &words, cword)?;
+                if kind == 'F' && status == 124 && attempt == 0 {
+                    retry = true;
+                    break;
+                }
+                opts.extend(copts.split_whitespace().map(|s| s.to_string()));
+                items.extend(lines);
+            }
+            if !retry {
+                break;
+            }
+            spec = self.fetch_spec(cmd)?;
+            opts = spec.opts.clone();
+        }
+        let has = |o: &str| opts.iter().any(|x| x == o);
+        let filenames = has("filenames");
+        let nospace = has("nospace");
+        if !spec.prefix.is_empty() || !spec.suffix.is_empty() {
+            for it in &mut items {
+                *it = format!("{}{}{}", spec.prefix, it, spec.suffix);
+            }
+        }
+        if !has("nosort") {
+            items.sort();
+        }
+        items.dedup();
+        items.retain(|s| !s.is_empty());
+        let mut cands: Vec<Cand> = Vec::new();
+        let (dir_part, _) = complete::split_dir(word);
+        for it in items {
+            let is_dir = (filenames || it.ends_with('/')) && {
+                let p = if it.starts_with('/') || it.starts_with('~') { it.clone() } else { format!("{dir_part}{it}") };
+                complete::path_exists(&p, &self.cwd, &self.home) && complete::resolve(&p, &self.cwd, &self.home).is_dir()
+            };
+            let mut insert = it.clone();
+            if is_dir && !insert.ends_with('/') {
+                insert.push('/');
+            }
+            let display = if filenames { complete::split_dir(&it).1.to_string() } else { it.clone() };
+            let display = if is_dir && !display.ends_with('/') { format!("{display}/") } else { display };
+            let space = !nospace && !is_dir && !insert.ends_with('=') && !insert.ends_with(':');
+            cands.push(Cand { display, insert, whole_line: false, is_dir, space });
+        }
+        if cands.is_empty() {
+            let fallback_files = has("default") || has("bashdefault") || has("dirnames") || has("plusdirs");
+            if !fallback_files {
+                return Some(Vec::new());
+            }
+            let only_dirs = has("dirnames") && !has("default") && !has("bashdefault");
+            let _ = wstart;
+            for f in complete::complete_files(word, &self.cwd, &self.home, self.rlvars.ignore_case, only_dirs, 400) {
+                cands.push(Cand {
+                    display: f.name.clone(),
+                    insert: format!("{dir_part}{}", f.name),
+                    whole_line: false,
+                    is_dir: f.is_dir,
+                    space: true,
+                });
+            }
+        }
+        Some(cands)
+    }
+
+    fn fetch_spec(&mut self, cmd: &str) -> Option<Spec> {
+        let mut req = Vec::new();
+        req.extend_from_slice(b"C\0");
+        req.extend_from_slice(cmd.as_bytes());
+        req.push(0);
+        self.reply(&req);
+        let ty = self.chan.field()?;
+        if ty.first() != Some(&b'S') {
+            // something else arrived (user interrupted?); process it and give up
+            let t = ty.first().copied().unwrap_or(0);
+            self.dispatch(t);
+            return None;
+        }
+        let text = self.chan.field_str()?;
+        let line = text.lines().next().unwrap_or("");
+        if line.is_empty() {
+            return None;
+        }
+        parse_spec(line)
+    }
+
+    fn run_spec_part(&mut self, kind: char, arg: &str, cmd: &str, words: &[String], cword: usize) -> Option<(i32, String, Vec<String>)> {
+        let mut req = Vec::new();
+        req.extend_from_slice(b"R\0");
+        req.push(kind as u8);
+        req.push(0);
+        req.extend_from_slice(arg.as_bytes());
+        req.push(0);
+        req.extend_from_slice(cmd.as_bytes());
+        req.push(0);
+        req.extend_from_slice(cword.to_string().as_bytes());
+        req.push(0);
+        req.extend_from_slice(self.line.as_bytes());
+        req.push(0);
+        req.extend_from_slice(self.point.to_string().as_bytes());
+        req.push(0);
+        req.extend_from_slice(words.len().to_string().as_bytes());
+        req.push(0);
+        for w in words {
+            req.extend_from_slice(w.as_bytes());
+            req.push(0);
+        }
+        self.reply(&req);
+        let ty = self.chan.field()?;
+        if ty.first() != Some(&b'Q') {
+            let t = ty.first().copied().unwrap_or(0);
+            self.dispatch(t);
+            return None;
+        }
+        let status: i32 = self.chan.field_str()?.trim().parse().unwrap_or(1);
+        let copts = self.chan.field_str()?;
+        let out = self.chan.field_str()?;
+        let lines = out.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+        Some((status, copts, lines))
     }
 }
 
@@ -906,4 +1311,36 @@ fn cands_to_groups(cands: &[Cand], match_len: usize, line_len: usize) -> Vec<Lis
         out.push(hist);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_parsing() {
+        let sp = parse_spec("complete -o default -o nospace -F _git git").unwrap();
+        assert_eq!(sp.func.as_deref(), Some("_git"));
+        assert_eq!(sp.opts, vec!["default", "nospace"]);
+        let sp = parse_spec("complete -W 'a b  c' -P '--' -S '=' foo").unwrap();
+        assert_eq!(sp.wordlist.as_deref(), Some("a b  c"));
+        assert_eq!(sp.prefix, "--");
+        assert_eq!(sp.suffix, "=");
+        let sp = parse_spec("complete -o bashdefault -o default -F _comp_complete_load -D").unwrap();
+        assert_eq!(sp.func.as_deref(), Some("_comp_complete_load"));
+        let sp = parse_spec("complete -d -A user x").unwrap();
+        assert_eq!(sp.actions, vec!["directory", "user"]);
+        assert!(parse_spec("").is_none());
+        assert_eq!(shell_words(r#"a "b c" 'd e' f\ g"#), vec!["a", "b c", "d e", "f g"]);
+    }
+
+    #[test]
+    fn comp_words_split() {
+        assert_eq!(comp_words("git ch", 6), (vec!["git".to_string(), "ch".into()], 1));
+        assert_eq!(comp_words("git ", 4), (vec!["git".to_string(), "".into()], 1));
+        assert_eq!(comp_words("git --opt=va", 12), (vec!["git".to_string(), "--opt".into(), "=".into(), "va".into()], 3));
+        assert_eq!(comp_words("ssh host:pa", 11).1, 3);
+        assert_eq!(comp_words("echo 'a b' c", 12).0, vec!["echo", "'a b'", "c"]);
+        assert_eq!(comp_words("ls x", 2), (vec!["ls".to_string(), "x".into()], 0));
+    }
 }

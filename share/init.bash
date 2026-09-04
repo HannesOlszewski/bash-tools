@@ -54,11 +54,65 @@ __bt_menu() {
             IFS= read -r -d '' -u "$__bt_r" -t 5 READLINE_POINT
             break
             ;;
+        C)  # the daemon wants the compspec of a command
+            IFS= read -r -d '' -u "$__bt_r" -t 5 reply
+            { printf 'S\0'; complete -p -- "$reply" 2>/dev/null || complete -p -D 2>/dev/null; printf '\0'; } >&"$__bt_w"
+            ;;
+        R) __bt_compspec ;;
         *) break ;;
         esac
     done
     __bt_busy=
     printf 'd\0' >&"$__bt_w"
+}
+
+# Run one part of a compspec on behalf of the daemon (bash's programmable
+# completion machinery only runs from readline's own Tab). Results are
+# streamed back as newline-separated lines.
+__bt_compspec() {
+    local kind arg cmd n i w st=0
+    local COMP_LINE COMP_POINT COMP_CWORD COMP_TYPE=9 COMP_KEY=9 COMPREPLY=() __bt_compopts=
+    local -a COMP_WORDS=()
+    IFS= read -r -d '' -u "$__bt_r" -t 5 kind
+    IFS= read -r -d '' -u "$__bt_r" -t 5 arg
+    IFS= read -r -d '' -u "$__bt_r" -t 5 cmd
+    IFS= read -r -d '' -u "$__bt_r" -t 5 COMP_CWORD
+    IFS= read -r -d '' -u "$__bt_r" -t 5 COMP_LINE
+    IFS= read -r -d '' -u "$__bt_r" -t 5 COMP_POINT
+    IFS= read -r -d '' -u "$__bt_r" -t 5 n
+    for ((i = 0; i < n; i++)); do
+        IFS= read -r -d '' -u "$__bt_r" -t 5 w
+        COMP_WORDS+=("$w")
+    done
+    local cur=${COMP_WORDS[COMP_CWORD]-} prev=
+    (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
+    case $kind in
+    F)
+        # `compopt` only works inside readline's completion; shim it so that
+        # completion functions can still tell us about nospace/filenames.
+        compopt() {
+            local o
+            while (( $# )); do
+                case $1 in
+                -o) __bt_compopts+=" $2"; shift ;;
+                +o) __bt_compopts=${__bt_compopts// $2/}; shift ;;
+                esac
+                shift
+            done
+            return 0
+        }
+        "$arg" "$cmd" "$cur" "$prev" 2>/dev/null
+        st=$?
+        unset -f compopt
+        { printf 'Q\0%s\0%s\0' "$st" "$__bt_compopts"; (( ${#COMPREPLY[@]} )) && printf '%s\n' "${COMPREPLY[@]}"; printf '\0'; } >&"$__bt_w"
+        ;;
+    W) { printf 'Q\0%s\0%s\0' 0 ''; compgen -W "$arg" -- "$cur" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+    A) { printf 'Q\0%s\0%s\0' 0 ''; compgen -A "$arg" -- "$cur" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+    G) { printf 'Q\0%s\0%s\0' 0 ''; compgen -G "$arg" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+    C) { printf 'Q\0%s\0%s\0' 0 ''; eval "$arg" '"$cmd" "$cur" "$prev"' 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+    *) printf 'Q\0%s\0%s\0\0' 1 '' >&"$__bt_w" ;;
+    esac
+    return 0
 }
 
 # The daemon sends SIGWINCH when it has something to paint. Readline handles
