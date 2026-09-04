@@ -1,0 +1,27 @@
+[package]
+name = "bash-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Fast syntax highlighting and live autocomplete for bash, written in Rust"
+license = "MIT"
+repository = "https://github.com/hannes-olszewski/bash-tools"
+rust-version = "1.75"
+
+[[bin]]
+name = "bash-tools"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+opt-level = 1
