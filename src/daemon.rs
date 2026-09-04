@@ -9,7 +9,7 @@
 //! | msg | fields                                   | meaning                              |
 //! |-----|------------------------------------------|--------------------------------------|
 //! | i   | pid home histfile styles rows opts       | init                                 |
-//! | p   | ps1 ps2 pwd path reserved n              | a new prompt is about to be shown    |
+//! | p   | ps1 ps2 pwd path reserved n wordbreaks   | a new prompt is about to be shown    |
 //! | H   | text                                     | last history entry                   |
 //! | l/e | line point n                             | line changed (insert / edit)         |
 //! | a   | n                                        | new readline call after accept-line  |
@@ -19,14 +19,16 @@
 //! | r   | –                                        | signal again later                   |
 //! | A/F | names (newline separated)                | aliases / functions                  |
 //! | V   | `bind -v` output                         | readline variables                   |
+//! | W   | `trap -p WINCH` output                   | reply: the user's trap command       |
 //! | x   | –                                        | exit                                 |
 //!
 //! `n` is bash's count of executed command lines (bumped by `PS0`); anything
 //! sent after a command started (`n` newer than at the last prompt) is
 //! ignored, e.g. hooks firing inside a script's `read -e`.
 //!
-//! Replies: `t`/`T` → `I\0line\0point\0` or `N\0`; `g` → one byte
-//! (`y` if something was drawn below the line, else `n`).
+//! Replies: `t`/`T` → `I\0line\0point\0` or `N\0`; `g` → two bytes:
+//! `y`/`n` (something was drawn below the line) and `m`/`r` (the SIGWINCH
+//! was ours / a real resize, so bash knows whether to run the user's trap).
 
 use crate::complete::{self, CommandIndex, DirCache, History};
 use crate::layout::{self, Layout};
@@ -293,6 +295,10 @@ pub struct Daemon {
     prompt_count: usize,
     /// bash's executed-command counter as of the last prompt.
     cmdno: u64,
+    /// `COMP_WORDBREAKS` of the shell.
+    wordbreaks: String,
+    /// Signals we sent that bash has not yet answered with `g`.
+    signals_sent: u32,
     seen_prompt_since_accept: bool,
     drew_below: bool,
     menu: Option<Menu>,
@@ -382,6 +388,8 @@ pub fn run() -> ! {
         rows_above: 0,
         prompt_count: 0,
         cmdno: 0,
+        wordbreaks: " \t\n\"'><=;|&(:".into(),
+        signals_sent: 0,
         seen_prompt_since_accept: true,
         drew_below: false,
         menu: None,
@@ -468,6 +476,14 @@ impl Daemon {
                     let s = self.chan.field_str().unwrap_or_default();
                     self.rlvars.parse(&s);
                 }
+                b'W' => {
+                    // `trap -p WINCH` output → the user's trap command (or empty)
+                    let s = self.chan.field_str().unwrap_or_default();
+                    let cmd = user_trap_command(&s);
+                    let mut r = cmd.into_bytes();
+                    r.push(0);
+                    self.reply(&r);
+                }
                 b'x' => return false,
                 _ => {
                     self.debug(&format!("unknown message {:?}", ty as char));
@@ -520,6 +536,10 @@ impl Daemon {
         let path = self.chan.field_str().unwrap_or_default();
         self.reserved = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
         self.cmdno = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
+        let wb = self.chan.field_str().unwrap_or_default();
+        if !wb.is_empty() {
+            self.wordbreaks = wb;
+        }
         if !pwd.is_empty() {
             self.cwd = PathBuf::from(pwd);
         }
@@ -599,9 +619,15 @@ impl Daemon {
         if self.log.is_some() {
             self.debug("go");
         }
+        let mine = if self.signals_sent > 0 {
+            self.signals_sent -= 1;
+            b'm'
+        } else {
+            b'r'
+        };
         let mut ack = b'n';
         if !ok {
-            self.reply(&[ack]);
+            self.reply(&[ack, mine]);
             return;
         }
         if self.at_prompt && !self.line.is_empty() {
@@ -633,7 +659,7 @@ impl Daemon {
             let _ = sys::write_all(self.tty.as_raw_fd(), &out);
             self.drew_below = false;
         }
-        self.reply(&[ack]);
+        self.reply(&[ack, mine]);
     }
 
     fn on_tab(&mut self, line: String, point: usize, backward: bool) {
@@ -856,6 +882,7 @@ impl Daemon {
             sys::nap_us(30);
         }
         sys::kill(self.bash_pid, libc::SIGWINCH);
+        self.signals_sent += 1;
         if self.log.is_some() {
             self.debug(&format!("signal after {}us ({} polls)", start.elapsed().as_micros(), polls));
         }
@@ -968,6 +995,21 @@ impl Daemon {
         let _ = word;
         Some(Menu { cands, idx: None, line: self.line.clone(), point: self.point, word_start: wstart, quote, match_len })
     }
+}
+
+/// Extract the command from `trap -- 'cmd' SIGWINCH`.
+fn user_trap_command(output: &str) -> String {
+    let line = output.lines().find(|l| l.starts_with("trap -- ")).unwrap_or("");
+    let words = shell_words(line);
+    // words: trap, --, cmd, SIGWINCH
+    if words.len() >= 4 && words[0] == "trap" && words[1] == "--" {
+        let cmd = words[2].trim();
+        if cmd.is_empty() || cmd == "__bt_winch" {
+            return String::new();
+        }
+        return cmd.to_string();
+    }
+    String::new()
 }
 
 /// A parsed `complete -p` line.
@@ -1112,7 +1154,7 @@ fn parse_spec(line: &str) -> Option<Spec> {
 /// Split a line into `COMP_WORDS` the way bash does: whitespace separates,
 /// other `COMP_WORDBREAKS` characters are words of their own, quoted text
 /// stays together. Returns the words and the index of the word at `point`.
-fn comp_words(line: &str, point: usize) -> (Vec<String>, usize) {
+fn comp_words(line: &str, point: usize, breaks: &str) -> (Vec<String>, usize) {
     let chars: Vec<char> = line.chars().collect();
     let point = point.min(chars.len());
     let mut words: Vec<(usize, String)> = Vec::new(); // (start, text)
@@ -1154,7 +1196,7 @@ fn comp_words(line: &str, point: usize) -> (Vec<String>, usize) {
                         words.push((start, std::mem::take(&mut cur)));
                         in_word = false;
                     }
-                } else if matches!(c, '>' | '<' | '=' | ';' | '|' | '&' | '(' | ':') {
+                } else if breaks.contains(c) {
                     if in_word {
                         words.push((start, std::mem::take(&mut cur)));
                         in_word = false;
@@ -1193,7 +1235,7 @@ impl Daemon {
     /// Ask bash for the compspec of `cmd`, run it, and turn the results
     /// into candidates. `None` when there is no compspec.
     fn compspec_candidates(&mut self, cmd: &str, wstart: usize, word: &str) -> Option<Vec<Cand>> {
-        let (words, cword) = comp_words(&self.line, self.point);
+        let (words, cword) = comp_words(&self.line, self.point, &self.wordbreaks);
         let mut spec = self.fetch_spec(cmd)?;
         let mut items: Vec<String> = Vec::new();
         let mut opts: Vec<String> = spec.opts.clone();
@@ -1385,12 +1427,23 @@ mod tests {
     }
 
     #[test]
+    fn trap_parsing() {
+        assert_eq!(user_trap_command("trap -- 'echo resized' SIGWINCH\n"), "echo resized");
+        assert_eq!(user_trap_command("trap -- 'a '\\''b'\\''' SIGWINCH"), "a 'b'");
+        assert_eq!(user_trap_command(""), "");
+        assert_eq!(user_trap_command("trap -- '' SIGWINCH"), "");
+    }
+
+    #[test]
     fn comp_words_split() {
-        assert_eq!(comp_words("git ch", 6), (vec!["git".to_string(), "ch".into()], 1));
-        assert_eq!(comp_words("git ", 4), (vec!["git".to_string(), "".into()], 1));
-        assert_eq!(comp_words("git --opt=va", 12), (vec!["git".to_string(), "--opt".into(), "=".into(), "va".into()], 3));
-        assert_eq!(comp_words("ssh host:pa", 11).1, 3);
-        assert_eq!(comp_words("echo 'a b' c", 12).0, vec!["echo", "'a b'", "c"]);
-        assert_eq!(comp_words("ls x", 2), (vec!["ls".to_string(), "x".into()], 0));
+        let wb = " \t\n\"'><=;|&(:";
+        assert_eq!(comp_words("git ch", 6, wb), (vec!["git".to_string(), "ch".into()], 1));
+        assert_eq!(comp_words("git ", 4, wb), (vec!["git".to_string(), "".into()], 1));
+        assert_eq!(comp_words("git --opt=va", 12, wb), (vec!["git".to_string(), "--opt".into(), "=".into(), "va".into()], 3));
+        assert_eq!(comp_words("ssh host:pa", 11, wb).1, 3);
+        // bash-completion removes `:` from COMP_WORDBREAKS
+        assert_eq!(comp_words("ssh host:pa", 11, " \t\n\"'><=;|&(").1, 1);
+        assert_eq!(comp_words("echo 'a b' c", 12, wb).0, vec!["echo", "'a b'", "c"]);
+        assert_eq!(comp_words("ls x", 2, wb), (vec!["ls".to_string(), "x".into()], 0));
     }
 }

@@ -149,10 +149,19 @@ pub fn inputrc() -> String {
 
 const INIT_TEMPLATE: &str = include_str!("../share/init.bash");
 
-/// The bash snippet to `source`/`eval`.
+/// The bash snippet to `source`/`eval`. Comment lines (except the header)
+/// and blank lines are dropped: bash still has to lex them at every start.
 pub fn init_script(bin: &str, inputrc_path: &str) -> String {
-    INIT_TEMPLATE
-        .replace("@BIN@", &shell_quote(bin))
+    let mut out = String::with_capacity(INIT_TEMPLATE.len());
+    for (i, line) in INIT_TEMPLATE.lines().enumerate() {
+        let t = line.trim_start();
+        if i > 1 && (t.is_empty() || (t.starts_with('#') && !t.starts_with("#!"))) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.replace("@BIN@", &shell_quote(bin))
         .replace("@INPUTRC@", &shell_quote(inputrc_path))
         .replace("@VERSION@", env!("CARGO_PKG_VERSION"))
 }

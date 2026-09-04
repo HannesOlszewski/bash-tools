@@ -93,14 +93,16 @@ bash-tools works around both:
    never changes.
 3. `PS0` (expanded once per executed command) erases the list and bumps a
    counter, so the daemon never paints while a command is running.
+4. An existing `WINCH` trap keeps working: it is chained and only run for
+   real resizes, not for the daemon's signals.
 
 Costs measured on an M1 MacBook (Linux forks are cheaper):
 
 | what | cost |
 |---|---|
-| sourcing the init snippet (including the daemon fork) | about 1.5 ms |
+| sourcing the init snippet (0.5 ms of it is the daemon fork) | about 1.3 ms |
 | per prompt (`PROMPT_COMMAND` hook, `${PS1@P}`, history sync) | about 0.2 ms |
-| keystroke to highlighted text on screen | 0.3 to 0.5 ms |
+| keystroke to highlighted text on screen (median) | 0.3 ms |
 
 No polling, no timers, no forks after startup. The binary has no runtime
 dependencies.

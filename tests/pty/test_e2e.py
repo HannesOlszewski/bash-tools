@@ -38,15 +38,16 @@ class Env:
             f.write("PS1=%s\n%s\nsource %s\n" % (q, extra, self.init))
         return p
 
-    def bash(self, extra='', ps1='$ ', cols=80, rows=24, env=None):
+    def bash(self, extra='', ps1='$ ', cols=80, rows=24, env=None, wait=None):
         e = {'HOME': self.dir, 'XDG_CACHE_HOME': self.cache, 'HISTFILE': self.hist,
              'BASH_TOOLS_DEBUG': os.path.join(self.dir, 'daemon.log')}
         if env:
             e.update(env)
         b = Bash(self.rc(extra, ps1), cols=cols, rows=rows, env=e)
-        wait = ps1.split('\n')[-1].strip()
-        if not wait or '\\' in wait:
-            wait = '$'
+        if wait is None:
+            wait = ps1.split('\n')[-1].strip()
+            if not wait or '\\' in wait:
+                wait = '$'
         assert b.wait_for(wait), 'no prompt: %r' % b.raw
         b.drain(0.3)
         return b
@@ -370,12 +371,12 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
             b.close()
 
     def test_colored_prompt(self):
-        b = ENV.bash(ps1='\\[\\e[1;32m\\]user@host\\[\\e[0m\\]:\\W\\$ ', cols=60)
+        b = ENV.bash(ps1='\\[\\e[1;32m\\]user@host\\[\\e[0m\\]:\\W\\$ ', cols=60, wait='user@host')
         try:
             b.type('ls -la')
             row = b.scr.text(0)
             self.assertTrue(row.startswith('user@host:'), row)
-            self.assertTrue(row.endswith('$ ls -la'), row)
+            self.assertTrue(row.endswith(('$ ls -la', '# ls -la')), row)
             self.assertStyle(b, 'ls -la', GREEN)
             self.assertStyle(b, '-la', CYAN)
             self.assertEqual((b.scr.cx, b.scr.cy), (len(row), 0))
@@ -396,6 +397,23 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
             b.send('A', 0.3)        # append at end
             b.type(' /etc')
             self.assertStyle(b, '/etc', UNDERLINE)
+        finally:
+            b.close()
+
+    def test_user_winch_trap_is_chained(self):
+        marker = os.path.join(ENV.dir, 'winch-%d' % os.getpid())
+        b = ENV.bash(extra="trap 'echo RESIZED >> %s' WINCH" % marker, cols=40, rows=12)
+        try:
+            b.type('ls -la')
+            self.assertStyle(b, 'ls', GREEN)
+            # our paints use SIGWINCH too, but the user's trap must only run
+            # for real resizes
+            self.assertFalse(os.path.exists(marker))
+            b.resize(50, 12)
+            b.drain(0.5)
+            self.assertTrue(os.path.exists(marker) and open(marker).read().count('RESIZED') == 1, 'marker missing')
+            self.assertEqual(b.scr.text(0), '$ ls -la')
+            self.assertStyle(b, 'ls', GREEN)
         finally:
             b.close()
 

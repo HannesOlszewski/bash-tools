@@ -112,9 +112,10 @@ __bt_winch() {
         printf 'r\0' >&"$__bt_w"
     elif [[ -n $__bt_w ]]; then
         printf 'g\0%s\0' "$__bt_n" >&"$__bt_w"
-        read -r -N 1 -u "$__bt_r" -t 2 __bt_ack
+        read -r -N 2 -u "$__bt_r" -t 2 __bt_ack
     fi
-    [[ -n $__bt_user_winch ]] && eval "$__bt_user_winch"
+    # the user's own WINCH trap only for real resizes, not for our paints
+    [[ -n $__bt_user_winch && $__bt_ack != ?m ]] && eval "$__bt_user_winch"
     return 0
 }
 
@@ -130,6 +131,11 @@ __bt_connect() {
         "$__bt_rows" "${BASH_TOOLS_OPTS-}" >&"$__bt_w"
     { printf 'V\0'; bind -v; printf '\0'; } >&"$__bt_w"
     __bt_refresh
+    # Chain an existing WINCH trap: capturing `trap -p` output in the shell
+    # costs a fork (or 0.3 ms in 5.3), so let the daemon parse it instead.
+    { printf 'W\0'; trap -p WINCH; printf '\0'; } >&"$__bt_w"
+    IFS= read -r -d '' -u "$__bt_r" -t 5 __bt_user_winch
+    trap '__bt_winch' WINCH
     return 0
 }
 __bt_refresh() {
@@ -164,7 +170,7 @@ __bt_prompt() {
     else
         printf '\e[J' >&2
     fi
-    printf 'p\0%s\0%s\0%s\0%s\0%s\0%s\0' "$ps1" "$ps2" "$PWD" "$PATH" "$n" "$__bt_n" >&"$__bt_w"
+    printf 'p\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$ps1" "$ps2" "$PWD" "$PATH" "$n" "$__bt_n" "${COMP_WORDBREAKS-}" >&"$__bt_w"
     if (( HISTCMD > 1 )); then
         { printf 'H\0'; fc -ln -1 2>/dev/null; printf '\0'; } >&"$__bt_w"
     fi
@@ -175,21 +181,10 @@ __bt_prompt() {
     return 0
 }
 
-# Hook into PROMPT_COMMAND (string or array) and the WINCH trap (chaining an
-# existing one).
+# Hook into PROMPT_COMMAND (string or array). The WINCH trap is installed at
+# the first prompt, once the daemon is connected.
 if [[ ${PROMPT_COMMAND@a} == *a* ]]; then
     PROMPT_COMMAND+=(__bt_prompt)
 else
     PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__bt_prompt"
 fi
-if (( BASH_VERSINFO[0] > 5 || BASH_VERSINFO[1] >= 3 )); then
-    eval '__bt_t=${ trap -p WINCH; }'
-else
-    __bt_t=$(trap -p WINCH)
-fi
-if [[ $__bt_t == "trap -- "*" SIGWINCH" ]]; then
-    __bt_t=${__bt_t#trap -- }
-    eval "__bt_user_winch=${__bt_t% SIGWINCH}"
-fi
-unset __bt_t
-trap '__bt_winch' WINCH
