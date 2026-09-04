@@ -4,7 +4,7 @@ Only what readline and bash-tools emit is modelled: cursor movement (CUU, CUD,
 CUF, CUB, CHA, CUP), erase (EL, ED), SGR, DECSC/DECRC, CR/LF/BS/TAB, wide
 characters and the pending-wrap state at the last column.
 """
-import os, pty, select, time, re, signal, fcntl, termios, struct, unicodedata
+import os, pty, select, time, re, signal, fcntl, termios, struct, unicodedata, subprocess
 
 def wcwidth(c):
     if ord(c) < 32 or ord(c) == 0x7f:
@@ -166,6 +166,21 @@ class Screen:
         return None
 
 
+def _pick_locale():
+    if os.environ.get('BASH_TOOLS_TEST_LOCALE'):
+        return os.environ['BASH_TOOLS_TEST_LOCALE']
+    try:
+        out = subprocess.run(['locale', '-a'], capture_output=True, text=True).stdout.split()
+    except Exception:
+        out = []
+    for cand in ('C.UTF-8', 'C.utf8', 'en_US.UTF-8', 'en_US.utf8'):
+        if cand in out:
+            return cand
+    return 'C.UTF-8'
+
+LOCALE = _pick_locale()
+
+
 class Bash:
     """An interactive bash running in a pty with the given rcfile."""
     BASH = os.environ.get('BASH_TOOLS_TEST_BASH') or '/opt/homebrew/bin/bash'
@@ -180,8 +195,8 @@ class Bash:
                 'TERM': 'xterm-256color',
                 'HOME': os.environ.get('HOME', '/tmp'),
                 'PATH': os.environ['PATH'],
-                'LANG': 'en_US.UTF-8',
-                'LC_ALL': 'en_US.UTF-8',
+                'LANG': LOCALE,
+                'LC_ALL': LOCALE,
                 'INPUTRC': '/dev/null',
                 'HISTFILE': '/dev/null',
                 'PS1': '$ ',

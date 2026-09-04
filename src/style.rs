@@ -191,8 +191,6 @@ pub enum Ui {
     Suggestion,
     /// Directory entries in the completion list.
     ListDir,
-    /// Bracket under the cursor and its match.
-    CursorBracket,
     /// Description text next to a list entry.
     ListDesc,
 }
@@ -205,22 +203,13 @@ impl Ui {
             Ui::ListMatch => "list-match",
             Ui::Suggestion => "suggestion",
             Ui::ListDir => "list-directory",
-            Ui::CursorBracket => "cursor-matchingbracket",
             Ui::ListDesc => "list-description",
         }
     }
-    const ALL: [Ui; 7] = [
-        Ui::ListSelected,
-        Ui::ListHeader,
-        Ui::ListMatch,
-        Ui::Suggestion,
-        Ui::ListDir,
-        Ui::CursorBracket,
-        Ui::ListDesc,
-    ];
+    const ALL: [Ui; 6] = [Ui::ListSelected, Ui::ListHeader, Ui::ListMatch, Ui::Suggestion, Ui::ListDir, Ui::ListDesc];
 }
 
-const KIND_ALL: [Kind; 34] = [
+const KIND_ALL: [Kind; 35] = [
     Kind::Default,
     Kind::Command,
     Kind::UnknownCommand,
@@ -255,6 +244,7 @@ const KIND_ALL: [Kind; 34] = [
     Kind::HeredocBody,
     Kind::Tilde,
     Kind::BracketError,
+    Kind::MatchingBracket,
 ];
 
 fn kind_index(k: Kind) -> usize {
@@ -307,6 +297,7 @@ impl Default for Theme {
             ("heredoc-delimiter", "fg=yellow"),
             ("heredoc-body", "fg=yellow"),
             ("bracket-error", "fg=red,bold"),
+            ("cursor-matchingbracket", "standout"),
             ("bracket-level-1", "fg=blue,bold"),
             ("bracket-level-2", "fg=green,bold"),
             ("bracket-level-3", "fg=magenta,bold"),
@@ -317,7 +308,6 @@ impl Default for Theme {
             ("list-match", "bold"),
             ("suggestion", "fg=8"),
             ("list-directory", "fg=blue"),
-            ("cursor-matchingbracket", "standout"),
             ("list-description", "fg=8"),
         ];
         for (k, v) in defaults {

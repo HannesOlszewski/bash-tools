@@ -67,6 +67,8 @@ pub enum Kind {
     /// Subshell parens / group braces, colored by nesting depth.
     Bracket(u8),
     BracketError,
+    /// The bracket under the cursor and its partner.
+    MatchingBracket,
 }
 
 impl Kind {
@@ -108,6 +110,7 @@ impl Kind {
             Kind::Tilde => "tilde",
             Kind::Bracket(_) => "bracket",
             Kind::BracketError => "bracket-error",
+            Kind::MatchingBracket => "cursor-matchingbracket",
         }
     }
 }
@@ -1700,6 +1703,104 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// If the cursor (byte offset `point`, or the byte just before it) sits on
+/// an unquoted bracket, re-kind that bracket and its partner as
+/// [`Kind::MatchingBracket`]. Brackets are matched on the flat span list, so
+/// quoted brackets never participate.
+pub fn mark_matching_bracket(text: &str, spans: &mut Vec<Span>, point: usize) {
+    let b = text.as_bytes();
+    let is_bracket_kind = |k: Kind| {
+        matches!(k, Kind::Bracket(_) | Kind::BracketError | Kind::CmdSubst | Kind::ArithDelim | Kind::ProcSubst | Kind::Keyword | Kind::Separator)
+    };
+    // candidate positions: the char at point, else the char before it
+    let mut cand = None;
+    for pos in [point, point.wrapping_sub(1)] {
+        if pos < b.len() && matches!(b[pos], b'(' | b')' | b'[' | b']' | b'{' | b'}') {
+            if let Some(sp) = spans.iter().find(|s| s.start <= pos && pos < s.end) {
+                if is_bracket_kind(sp.kind) {
+                    cand = Some(pos);
+                    break;
+                }
+            }
+        }
+    }
+    let pos = match cand {
+        Some(p) => p,
+        None => return,
+    };
+    let (open, close, forward) = match b[pos] {
+        b'(' => (b'(', b')', true),
+        b')' => (b'(', b')', false),
+        b'[' => (b'[', b']', true),
+        b']' => (b'[', b']', false),
+        b'{' => (b'{', b'}', true),
+        _ => (b'{', b'}', false),
+    };
+    // walk over bracket-kind bytes only
+    let bracket_byte = |i: usize| -> Option<u8> {
+        let sp = spans.iter().find(|s| s.start <= i && i < s.end)?;
+        if is_bracket_kind(sp.kind) {
+            Some(b[i])
+        } else {
+            None
+        }
+    };
+    let mut depth = 0i32;
+    let mut partner = None;
+    if forward {
+        let mut i = pos;
+        while i < b.len() {
+            match bracket_byte(i) {
+                Some(c) if c == open => depth += 1,
+                Some(c) if c == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        partner = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    } else {
+        let mut i = pos as isize;
+        while i >= 0 {
+            match bracket_byte(i as usize) {
+                Some(c) if c == close => depth += 1,
+                Some(c) if c == open => {
+                    depth -= 1;
+                    if depth == 0 {
+                        partner = Some(i as usize);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i -= 1;
+        }
+    }
+    let mut marks = vec![pos];
+    if let Some(p) = partner {
+        marks.push(p);
+    }
+    for m in marks {
+        // split the containing span so only this byte changes kind
+        if let Some(idx) = spans.iter().position(|s| s.start <= m && m < s.end) {
+            let sp = spans[idx];
+            let mut pieces = Vec::new();
+            if sp.start < m {
+                pieces.push(Span { start: sp.start, end: m, kind: sp.kind });
+            }
+            pieces.push(Span { start: m, end: m + 1, kind: Kind::MatchingBracket });
+            if m + 1 < sp.end {
+                pieces.push(Span { start: m + 1, end: sp.end, kind: sp.kind });
+            }
+            spans.splice(idx..idx + 1, pieces);
+        }
+    }
+}
+
 fn push_merge(out: &mut Vec<Span>, sp: Span) {
     if let Some(last) = out.last_mut() {
         if last.kind == sp.kind && last.end == sp.start {
@@ -1904,6 +2005,24 @@ mod tests {
         let spans = lex(src, &L);
         assert_eq!(spans.last().unwrap().end, src.len());
         assert_eq!(find(src, "ünïcode"), Kind::Argument);
+    }
+
+    #[test]
+    fn matching_brackets() {
+        let src = "echo $(ls (a) ) x";
+        let mut spans = lex(src, &L);
+        mark_matching_bracket(src, &mut spans, 6); // on `(` of `$(`
+        let marked: Vec<usize> = spans.iter().filter(|s| s.kind == Kind::MatchingBracket).map(|s| s.start).collect();
+        assert_eq!(marked, vec![6, 14]);
+        let mut spans = lex(src, &L);
+        mark_matching_bracket(src, &mut spans, 13); // right after `)` of `(a)`
+        let marked: Vec<usize> = spans.iter().filter(|s| s.kind == Kind::MatchingBracket).map(|s| s.start).collect();
+        assert_eq!(marked, vec![10, 12]);
+        // quoted brackets are ignored
+        let src = "echo '(' x";
+        let mut spans = lex(src, &L);
+        mark_matching_bracket(src, &mut spans, 6);
+        assert!(!spans.iter().any(|s| s.kind == Kind::MatchingBracket));
     }
 
     #[test]

@@ -74,17 +74,17 @@ class T(unittest.TestCase):
     def test_basic_highlight_and_cursor(self):
         b = ENV.bash(cols=60, rows=16)
         try:
-            b.type('ls -la /etc')
+            b.type('ls -ld /etc')
             self.assertStyle(b, 'ls', GREEN)
-            self.assertStyle(b, '-la', CYAN)
+            self.assertStyle(b, '-ld', CYAN)
             self.assertStyle(b, '/etc', UNDERLINE)
             self.assertEqual((b.scr.cx, b.scr.cy), (13, 0))
-            self.assertEqual(b.scr.text(0), '$ ls -la /etc')
+            self.assertEqual(b.scr.text(0), '$ ls -ld /etc')
             # completion list below
             self.assertIsNotNone(b.scr.find('etc/'))
             b.send('\r', 0.6)
             # list erased, output printed right below the command line
-            self.assertEqual(b.scr.text(0), '$ ls -la /etc')
+            self.assertEqual(b.scr.text(0), '$ ls -ld /etc')
             self.assertTrue(b.scr.text(1).startswith(('l', 'd', '-', 't')), b.scr.dump())
             self.assertEqual(b.scr.log, [])
         finally:
@@ -323,6 +323,24 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
             b.send('\t', 0.6)
             self.assertEqual(b.scr.text(0), '$ lazycmd beta')
             self.assertEqual(b.scr.log, [])
+        finally:
+            b.close()
+
+    def test_read_e_in_script_is_left_alone(self):
+        b = ENV.bash(extra='f() { local v; read -e -p "name: " v; echo "got $v"; }')
+        try:
+            b.type('f')
+            self.assertStyle(b, 'f', GREEN)
+            b.send('\r', 0.4)
+            b.type('ls /etc')
+            # no highlighting, no completion list inside read -e
+            self.assertEqual(b.scr.styled(1), '{}name: ls /etc')
+            self.assertIsNone(b.scr.find('etc/'))
+            b.send('\r', 0.4)
+            self.assertEqual(b.scr.text(2), 'got ls /etc')
+            # and the prompt works again afterwards
+            b.type('ls')
+            self.assertEqual(b.scr.styled(b.scr.cy), '{}$ {0;32}ls{}')
         finally:
             b.close()
 

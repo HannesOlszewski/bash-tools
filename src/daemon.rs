@@ -9,22 +9,26 @@
 //! | msg | fields                                   | meaning                              |
 //! |-----|------------------------------------------|--------------------------------------|
 //! | i   | pid home histfile styles rows opts       | init                                 |
-//! | p   | ps1 ps2 pwd path reserved                | a new prompt is about to be shown    |
+//! | p   | ps1 ps2 pwd path reserved n              | a new prompt is about to be shown    |
 //! | H   | text                                     | last history entry                   |
-//! | l/e | line point                               | line changed (insert / edit)         |
-//! | a   | –                                        | new readline call after accept-line  |
-//! | t/T | line point                               | Tab / Shift-Tab (expects reply)      |
+//! | l/e | line point n                             | line changed (insert / edit)         |
+//! | a   | n                                        | new readline call after accept-line  |
+//! | t/T | line point n                             | Tab / Shift-Tab (expects reply)      |
 //! | d   | –                                        | bash finished a reply-based hook     |
-//! | g   | –                                        | paint now (from the WINCH trap)      |
+//! | g   | n                                        | paint now (from the WINCH trap)      |
 //! | r   | –                                        | signal again later                   |
 //! | A/F | names (newline separated)                | aliases / functions                  |
 //! | V   | `bind -v` output                         | readline variables                   |
 //! | x   | –                                        | exit                                 |
 //!
+//! `n` is bash's count of executed command lines (bumped by `PS0`); anything
+//! sent after a command started (`n` newer than at the last prompt) is
+//! ignored, e.g. hooks firing inside a script's `read -e`.
+//!
 //! Replies: `t`/`T` → `I\0line\0point\0` or `N\0`; `g` → one byte
 //! (`y` if something was drawn below the line, else `n`).
 
-use crate::complete::{self, CommandIndex, History};
+use crate::complete::{self, CommandIndex, DirCache, History};
 use crate::layout::{self, Layout};
 use crate::lexer::{self, Kind, Lookup, Span};
 use crate::render::{self, Frame, ListEntry, ListGroup};
@@ -277,6 +281,7 @@ pub struct Daemon {
     cwd: PathBuf,
     home: String,
     cmds: CommandIndex,
+    dirs: DirCache,
     history: History,
     line: String,
     point: usize,
@@ -284,6 +289,10 @@ pub struct Daemon {
     ps2_mode: bool,
     ps2_ctx: String,
     rows_above: usize,
+    /// Number of `p` messages seen (PS1 prompts shown).
+    prompt_count: usize,
+    /// bash's executed-command counter as of the last prompt.
+    cmdno: u64,
     seen_prompt_since_accept: bool,
     drew_below: bool,
     menu: Option<Menu>,
@@ -363,6 +372,7 @@ pub fn run() -> ! {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         home: std::env::var("HOME").unwrap_or_default(),
         cmds: CommandIndex::default(),
+        dirs: DirCache::default(),
         history: History::default(),
         line: String::new(),
         point: 0,
@@ -370,6 +380,8 @@ pub fn run() -> ! {
         ps2_mode: false,
         ps2_ctx: String::new(),
         rows_above: 0,
+        prompt_count: 0,
+        cmdno: 0,
         seen_prompt_since_accept: true,
         drew_below: false,
         menu: None,
@@ -420,16 +432,29 @@ impl Daemon {
                 b'l' | b'e' => {
                     let line = self.chan.field_str().unwrap_or_default();
                     let point = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
-                    self.on_line(line, point, ty == b'l');
+                    if self.cmdno_matches() {
+                        self.on_line(line, point, ty == b'l');
+                    }
                 }
-                b'a' => self.on_accept(),
+                b'a' => {
+                    if self.cmdno_matches() {
+                        self.on_accept();
+                    }
+                }
                 b't' | b'T' => {
                     let line = self.chan.field_str().unwrap_or_default();
                     let point = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
-                    self.on_tab(line, point, ty == b'T');
+                    if self.cmdno_matches() {
+                        self.on_tab(line, point, ty == b'T');
+                    } else {
+                        self.reply(b"N\0");
+                    }
                 }
                 b'd' => self.request_paint(),
-                b'g' => self.on_go(),
+                b'g' => {
+                    let ok = self.cmdno_matches();
+                    self.on_go(ok);
+                }
                 b'r' => self.request_paint(),
                 b'A' => {
                     let s = self.chan.field_str().unwrap_or_default();
@@ -494,12 +519,14 @@ impl Daemon {
         let pwd = self.chan.field_str().unwrap_or_default();
         let path = self.chan.field_str().unwrap_or_default();
         self.reserved = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
+        self.cmdno = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
         if !pwd.is_empty() {
             self.cwd = PathBuf::from(pwd);
         }
         self.cmds.refresh_path(&path, false);
         self.history.reload_if_grown();
         self.at_prompt = true;
+        self.prompt_count += 1;
         self.ps2_mode = false;
         self.ps2_ctx.clear();
         self.rows_above = 0;
@@ -548,7 +575,6 @@ impl Daemon {
         }
         self.line = line;
         self.point = point;
-        self.at_prompt = true;
         self.seen_prompt_since_accept = false;
         self.list_visible = !self.line.is_empty();
         self.frame_valid = false;
@@ -556,11 +582,28 @@ impl Daemon {
         self.request_paint();
     }
 
-    fn on_go(&mut self) {
+    /// Read the command counter field and compare with the one seen at the
+    /// last prompt. A mismatch means a command line has been accepted since.
+    fn cmdno_matches(&mut self) -> bool {
+        let n = self.chan.field_str().unwrap_or_default();
+        let n: u64 = n.trim().parse().unwrap_or(self.cmdno);
+        if n != self.cmdno {
+            self.debug(&format!("ignoring message: command {} running (prompt has {})", n, self.cmdno));
+            self.at_prompt = false;
+            return false;
+        }
+        self.at_prompt
+    }
+
+    fn on_go(&mut self, ok: bool) {
         if self.log.is_some() {
             self.debug("go");
         }
         let mut ack = b'n';
+        if !ok {
+            self.reply(&[ack]);
+            return;
+        }
         if self.at_prompt && !self.line.is_empty() {
             self.compute_frame();
             let frame = std::mem::take(&mut self.frame);
@@ -594,7 +637,6 @@ impl Daemon {
     }
 
     fn on_tab(&mut self, line: String, point: usize, backward: bool) {
-        self.at_prompt = true;
         self.seen_prompt_since_accept = false;
         let reuse = matches!(&self.menu, Some(m) if m.line == line && m.point == point);
         if !reuse {
@@ -718,19 +760,25 @@ impl Daemon {
         self.reserved.saturating_sub(above + lay.rows - 1)
     }
 
-    /// Highlight spans for the current line (taking PS2 context into account).
+    /// Highlight spans for the current line (taking PS2 context into account),
+    /// with the bracket under the cursor and its partner marked.
     fn spans(&self) -> Vec<Span> {
         let env = Env { cmds: &self.cmds, cwd: &self.cwd, home: &self.home };
-        if self.ps2_ctx.is_empty() {
-            return lexer::lex(&self.line, &env);
-        }
-        let full = format!("{}{}", self.ps2_ctx, self.line);
-        let off = self.ps2_ctx.len();
-        lexer::lex(&full, &env)
-            .into_iter()
-            .filter(|s| s.end > off)
-            .map(|s| Span { start: s.start.saturating_sub(off), end: s.end - off, kind: s.kind })
-            .collect()
+        let mut spans = if self.ps2_ctx.is_empty() {
+            lexer::lex(&self.line, &env)
+        } else {
+            let full = format!("{}{}", self.ps2_ctx, self.line);
+            let off = self.ps2_ctx.len();
+            lexer::lex(&full, &env)
+                .into_iter()
+                .filter(|s| s.end > off)
+                .map(|s| Span { start: s.start.saturating_sub(off), end: s.end - off, kind: s.kind })
+                .collect()
+        };
+        // byte offset of the cursor
+        let point_byte = self.line.char_indices().nth(self.point).map(|(i, _)| i).unwrap_or(self.line.len());
+        lexer::mark_matching_bracket(&self.line, &mut spans, point_byte);
+        spans
     }
 
     fn compute_frame(&mut self) {
@@ -864,7 +912,7 @@ impl Daemon {
                 }
             }
             if word.contains('/') || word.starts_with('.') {
-                for f in complete::complete_files(&word, &self.cwd, &self.home, ic, false, limit) {
+                for f in self.dirs.complete(&word, &self.cwd, &self.home, ic, false, limit) {
                     let (dir, _) = complete::split_dir(&word);
                     cands.push(Cand {
                         display: f.name.clone(),
@@ -877,7 +925,7 @@ impl Daemon {
             }
         } else {
             let only_dirs = matches!(self.current_command(wstart).as_deref(), Some("cd" | "pushd" | "rmdir" | "mkdir"));
-            for f in complete::complete_files(&word, &self.cwd, &self.home, ic, only_dirs, limit) {
+            for f in self.dirs.complete(&word, &self.cwd, &self.home, ic, only_dirs, limit) {
                 let (dir, _) = complete::split_dir(&word);
                 cands.push(Cand {
                     display: f.name.clone(),
@@ -1222,7 +1270,7 @@ impl Daemon {
             }
             let only_dirs = has("dirnames") && !has("default") && !has("bashdefault");
             let _ = wstart;
-            for f in complete::complete_files(word, &self.cwd, &self.home, self.rlvars.ignore_case, only_dirs, 400) {
+            for f in self.dirs.complete(word, &self.cwd, &self.home, self.rlvars.ignore_case, only_dirs, 400) {
                 cands.push(Cand {
                     display: f.name.clone(),
                     insert: format!("{dir_part}{}", f.name),

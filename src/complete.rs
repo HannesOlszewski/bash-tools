@@ -176,41 +176,72 @@ pub fn resolve(p: &str, cwd: &Path, home: &str) -> PathBuf {
     }
 }
 
-/// List directory entries under the directory part of `word` whose names
-/// start with the basename part. Hidden files only when the prefix starts
-/// with a dot. `only_dirs` restricts to directories (e.g. after `cd`).
-pub fn complete_files(word: &str, cwd: &Path, home: &str, ignore_case: bool, only_dirs: bool, limit: usize) -> Vec<FileCand> {
-    let (dir_part, base) = split_dir(word);
-    let dir = if dir_part.is_empty() { cwd.to_path_buf() } else { resolve(dir_part, cwd, home) };
-    let rd = match fs::read_dir(&dir) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let show_hidden = base.starts_with('.');
-    let lbase = if ignore_case { base.to_lowercase() } else { String::new() };
-    let mut out: Vec<FileCand> = Vec::new();
-    for e in rd.flatten() {
-        let name = match e.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
+/// Cached, sorted directory listings keyed by path and validated by mtime,
+/// so that typing inside a big directory does not re-read it per keystroke.
+#[derive(Default)]
+pub struct DirCache {
+    map: HashMap<PathBuf, (Option<SystemTime>, Vec<FileCand>)>,
+}
+
+impl DirCache {
+    fn entries(&mut self, dir: &Path) -> &[FileCand] {
+        let mtime = fs::metadata(dir).ok().and_then(|m| m.modified().ok());
+        let stale = match self.map.get(dir) {
+            Some((m, _)) => *m != mtime || mtime.is_none(),
+            None => true,
         };
-        if !show_hidden && name.starts_with('.') {
-            continue;
+        if stale {
+            let mut list: Vec<FileCand> = Vec::new();
+            if let Ok(rd) = fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let name = match e.file_name().into_string() {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let ft = e.file_type();
+                    let is_dir = ft.as_ref().map(|t| t.is_dir()).unwrap_or(false)
+                        || (ft.map(|t| t.is_symlink()).unwrap_or(false) && fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false));
+                    list.push(FileCand { name: if is_dir { format!("{name}/") } else { name }, is_dir });
+                }
+            }
+            list.sort_by(|a, b| a.name.cmp(&b.name));
+            if self.map.len() > 64 {
+                self.map.clear();
+            }
+            self.map.insert(dir.to_path_buf(), (mtime, list));
         }
-        let matches = if ignore_case { name.to_lowercase().starts_with(&lbase) } else { name.starts_with(base) };
-        if !matches {
-            continue;
-        }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-            || (e.file_type().map(|t| t.is_symlink()).unwrap_or(false) && fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false));
-        if only_dirs && !is_dir {
-            continue;
-        }
-        out.push(FileCand { name: if is_dir { format!("{name}/") } else { name }, is_dir });
+        &self.map.get(dir).unwrap().1
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out.truncate(limit);
-    out
+
+    /// Entries under the directory part of `word` whose names start with
+    /// the basename part. Hidden files only when the prefix starts with a
+    /// dot. `only_dirs` restricts to directories (e.g. after `cd`).
+    pub fn complete(&mut self, word: &str, cwd: &Path, home: &str, ignore_case: bool, only_dirs: bool, limit: usize) -> Vec<FileCand> {
+        let (dir_part, base) = split_dir(word);
+        let dir = if dir_part.is_empty() { cwd.to_path_buf() } else { resolve(dir_part, cwd, home) };
+        let show_hidden = base.starts_with('.');
+        let lbase = if ignore_case { base.to_lowercase() } else { String::new() };
+        let mut out: Vec<FileCand> = Vec::new();
+        for e in self.entries(&dir) {
+            if !show_hidden && e.name.starts_with('.') {
+                continue;
+            }
+            let matches = if ignore_case { e.name.to_lowercase().starts_with(&lbase) } else { e.name.starts_with(base) };
+            if !matches || (only_dirs && !e.is_dir) {
+                continue;
+            }
+            out.push(e.clone());
+            if out.len() >= limit {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// Convenience wrapper without a cache.
+pub fn complete_files(word: &str, cwd: &Path, home: &str, ignore_case: bool, only_dirs: bool, limit: usize) -> Vec<FileCand> {
+    DirCache::default().complete(word, cwd, home, ignore_case, only_dirs, limit)
 }
 
 pub fn path_exists(p: &str, cwd: &Path, home: &str) -> bool {
