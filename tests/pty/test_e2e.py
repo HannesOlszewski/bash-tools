@@ -33,8 +33,9 @@ class Env:
 
     def rc(self, extra='', ps1='$ '):
         p = os.path.join(self.dir, 'rc-%d.bash' % int(time.time() * 1e6))
+        q = "'" + ps1.replace("'", "'\\''") + "'"   # bash single-quoting
         with open(p, 'w') as f:
-            f.write("PS1=%r\n%s\nsource %s\n" % (ps1, extra, self.init))
+            f.write("PS1=%s\n%s\nsource %s\n" % (q, extra, self.init))
         return p
 
     def bash(self, extra='', ps1='$ ', cols=80, rows=24, env=None):
@@ -43,7 +44,10 @@ class Env:
         if env:
             e.update(env)
         b = Bash(self.rc(extra, ps1), cols=cols, rows=rows, env=e)
-        assert b.wait_for(ps1.split('\n')[-1].strip() or '$'), 'no prompt: %r' % b.raw
+        wait = ps1.split('\n')[-1].strip()
+        if not wait or '\\' in wait:
+            wait = '$'
+        assert b.wait_for(wait), 'no prompt: %r' % b.raw
         b.drain(0.3)
         return b
 
@@ -341,6 +345,57 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
             # and the prompt works again afterwards
             b.type('ls')
             self.assertEqual(b.scr.styled(b.scr.cy), '{}$ {0;32}ls{}')
+        finally:
+            b.close()
+
+    def test_typeahead_burst(self):
+        b = ENV.bash(cols=50)
+        try:
+            # everything arrives in one write: hooks, signals and paints must
+            # settle to the correct final state
+            b.send('ls -la /etc/hosts | grep -v x\x7f\x7f y', 0.6)
+            self.assertEqual(b.scr.text(0), '$ ls -la /etc/hosts | grep -v y')
+            self.assertStyle(b, 'ls', GREEN)
+            self.assertStyle(b, 'grep', GREEN)
+            self.assertStyle(b, '/etc/hosts', UNDERLINE)
+            self.assertEqual((b.scr.cx, b.scr.cy), (31, 0))
+            b.send('\x15')
+            b.send('echo one\recho two\r', 0.8)
+            y = b.scr.find('$ echo one')[0]
+            self.assertEqual(b.scr.text(y + 1), 'one')
+            self.assertEqual(b.scr.text(y + 2), '$ echo two')
+            self.assertEqual(b.scr.text(y + 3), 'two')
+            self.assertEqual(b.scr.log, [])
+        finally:
+            b.close()
+
+    def test_colored_prompt(self):
+        b = ENV.bash(ps1='\\[\\e[1;32m\\]user@host\\[\\e[0m\\]:\\W\\$ ', cols=60)
+        try:
+            b.type('ls -la')
+            row = b.scr.text(0)
+            self.assertTrue(row.startswith('user@host:'), row)
+            self.assertTrue(row.endswith('$ ls -la'), row)
+            self.assertStyle(b, 'ls -la', GREEN)
+            self.assertStyle(b, '-la', CYAN)
+            self.assertEqual((b.scr.cx, b.scr.cy), (len(row), 0))
+        finally:
+            b.close()
+
+    def test_vi_mode(self):
+        b = ENV.bash(extra='set -o vi')
+        try:
+            b.type('lsx -la')
+            self.assertStyle(b, 'lsx', RED)
+            b.send('\x1b', 0.4)     # ESC: command mode
+            b.send('0', 0.2)        # start of line
+            b.send('ll', 0.2)       # move right twice
+            b.send('x', 0.4)        # delete the 'x'
+            self.assertEqual(b.scr.text(0), '$ ls -la')
+            self.assertStyle(b, 'ls', GREEN)
+            b.send('A', 0.3)        # append at end
+            b.type(' /etc')
+            self.assertStyle(b, '/etc', UNDERLINE)
         finally:
             b.close()
 

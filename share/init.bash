@@ -5,10 +5,9 @@
 [[ -z ${__bt_r-} && -t 0 && -t 2 ]] || return 0
 
 __bt_bin=@BIN@
+[[ -x $__bt_bin ]] || return 0
 __bt_rows=${BASH_TOOLS_LIST_ROWS:-8}
-__bt_w= __bt_pid= __bt_busy= __bt_ack= __bt_last_refresh=0 __bt_user_winch= __bt_n=0
-printf -v __bt_nl '%*s' "$__bt_rows" ''
-__bt_nl=${__bt_nl// /$'\n'}
+__bt_w= __bt_pid= __bt_busy= __bt_ack= __bt_last_refresh=0 __bt_user_winch= __bt_n=0 __bt_nl=
 
 # PS0 is expanded once per executed command line, right before it runs: erase
 # the completion list below the prompt and bump a counter that tells the
@@ -152,10 +151,16 @@ __bt_prompt() {
         return 0
     fi
     local ps1=${PS1@P} ps2=${PS2@P} nl n
+    # reserve rows below the prompt for the list (+ the prompt's own lines)
     nl=${ps1//[!$'\n']/}
     n=$(( __bt_rows + ${#nl} ))
+    (( LINES > 0 && n > LINES / 2 )) && n=$(( LINES / 2 ))
+    if (( n != ${#__bt_nl} )); then
+        printf -v __bt_nl '%*s' "$n" ''
+        __bt_nl=${__bt_nl// /$'\n'}
+    fi
     if (( n > 0 )); then
-        printf '\e[J%s%s\e[%dA' "$__bt_nl" "$nl" "$n" >&2
+        printf '\e[J%s\e[%dA' "$__bt_nl" "$n" >&2
     else
         printf '\e[J' >&2
     fi

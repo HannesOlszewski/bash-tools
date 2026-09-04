@@ -1344,7 +1344,9 @@ fn cands_to_groups(cands: &[Cand], match_len: usize, line_len: usize) -> Vec<Lis
     let mut words = ListGroup { header: String::new(), match_len, entries: Vec::new() };
     let mut hist = ListGroup { header: "history".into(), match_len: line_len, entries: Vec::new() };
     for c in cands {
-        let e = ListEntry { text: c.display.clone(), is_dir: c.is_dir, desc: String::new() };
+        // control characters (multi-line history entries) would break the list
+        let text: String = c.display.chars().map(|ch| if ch == '\n' { '\u{23ce}' } else if ch.is_control() { ' ' } else { ch }).collect();
+        let e = ListEntry { text, is_dir: c.is_dir, desc: String::new() };
         if c.whole_line {
             hist.entries.push(e);
         } else {
