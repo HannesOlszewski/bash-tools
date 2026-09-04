@@ -143,7 +143,9 @@ pub trait Lookup {
 }
 
 /// A [`Lookup`] that knows nothing (everything is unknown, no paths).
+#[cfg(test)]
 pub struct NoLookup;
+#[cfg(test)]
 impl Lookup for NoLookup {
     fn command_kind(&self, _: &str) -> Option<Kind> {
         None
@@ -166,10 +168,6 @@ pub const KEYWORDS: &[&str] = &[
     "!", "[[", "]]", "{", "}", "case", "coproc", "do", "done", "elif", "else", "esac", "fi",
     "for", "function", "if", "in", "select", "then", "time", "until", "while",
 ];
-
-pub fn is_builtin(name: &str) -> bool {
-    BUILTINS.contains(&name)
-}
 
 pub fn is_keyword(name: &str) -> bool {
     KEYWORDS.contains(&name)
@@ -337,6 +335,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Run the lexer over the whole input.
+    #[cfg(test)]
     pub fn run(mut self) -> (Vec<Span>, bool) {
         self.lex_list(Term::Eof, &mut Ctx::new());
         let inc = self.incomplete;

@@ -48,8 +48,10 @@ pub struct Layout {
     pub end_col: usize,
     pub point_row: usize,
     pub point_col: usize,
-    /// Column where the text starts on row `text_row` (after the prompt).
+    /// Where the text starts (after the prompt).
+    #[allow(dead_code)]
     pub text_row: usize,
+    #[allow(dead_code)]
     pub text_col: usize,
 }
 

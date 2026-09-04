@@ -4,7 +4,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, RawFd};
 
 pub fn open_tty() -> Option<File> {
     use std::fs::OpenOptions;
@@ -52,13 +52,6 @@ pub fn open_fifo_reader(path: &str) -> io::Result<File> {
 
 pub fn kill(pid: i32, sig: i32) -> bool {
     unsafe { libc::kill(pid, sig) == 0 }
-}
-
-pub fn process_exists(pid: i32) -> bool {
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 pub fn getppid() -> i32 {
@@ -161,10 +154,6 @@ pub fn read_some(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
         }
         return Ok(n as usize);
     }
-}
-
-pub fn fd_of(f: &File) -> RawFd {
-    f.as_raw_fd()
 }
 
 /// Sleep for a few microseconds (used while polling bash's state).

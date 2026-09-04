@@ -240,6 +240,7 @@ impl DirCache {
 }
 
 /// Convenience wrapper without a cache.
+#[cfg(test)]
 pub fn complete_files(word: &str, cwd: &Path, home: &str, ignore_case: bool, only_dirs: bool, limit: usize) -> Vec<FileCand> {
     DirCache::default().complete(word, cwd, home, ignore_case, only_dirs, limit)
 }
