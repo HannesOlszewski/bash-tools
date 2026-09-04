@@ -1,5 +1,5 @@
 //! Runs the pseudo-terminal end-to-end suite (tests/pty/test_e2e.py) against
-//! the release binary when python3 is available. Skipped otherwise.
+//! the binary cargo built for this test run, when python3 is available.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,13 +11,10 @@ fn pty_end_to_end() {
         eprintln!("python3 not available, skipping pty suite");
         return;
     }
-    // Build the release binary the suite drives.
-    let status = Command::new(env!("CARGO")).args(["build", "--release", "--quiet"]).current_dir(&root).status().expect("cargo");
-    assert!(status.success(), "release build failed");
-    let bin = root.join("target/release/bash-tools");
+    let bin = env!("CARGO_BIN_EXE_bash-tools");
     let out = Command::new("python3")
         .arg(root.join("tests/pty/test_e2e.py"))
-        .env("BASH_TOOLS_BIN", &bin)
+        .env("BASH_TOOLS_BIN", bin)
         .current_dir(&root)
         .output()
         .expect("run python suite");
