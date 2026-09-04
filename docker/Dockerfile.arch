@@ -1,3 +1,5 @@
 FROM archlinux:latest
-RUN pacman-key --init && pacman -Sy --noconfirm archlinux-keyring && pacman -Syu --noconfirm --needed rust python bash gcc && pacman -Scc --noconfirm
+# pacman's seccomp sandbox does not work under qemu emulation (arm64 hosts)
+RUN sed -i 's/^#\?DisableSandbox.*/DisableSandbox/' /etc/pacman.conf; grep -q '^DisableSandbox' /etc/pacman.conf || sed -i 's/^\[options\]/[options]\nDisableSandbox/' /etc/pacman.conf
+RUN pacman -Syu --noconfirm --needed rust python bash gcc && pacman -Scc --noconfirm
 WORKDIR /work
