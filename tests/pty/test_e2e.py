@@ -422,11 +422,12 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
         # bind -x hook; we must detect that and stay out of the way
         b = ENV.bash(cols=60, rows=12, env={'TERM': 'xterm-doesnotexist'}, wait='bash-tools:')
         try:
+            y0 = b.scr.cy
             b.type('ls -la')
-            self.assertEqual(b.scr.cy, 1)
-            self.assertEqual(b.scr.text(1), '$ ls -la')
-            b.send('\r', 0.5)
-            self.assertEqual(b.scr.text(1), '$ ls -la')
+            # still on the same row: no redraw on a new line per keystroke
+            self.assertEqual(b.scr.cy, y0)
+            self.assertEqual(b.scr.text(y0), '$ ls -la')
+            self.assertEqual(b.scr.styled(y0), '{}$ ls -la')
         finally:
             b.close()
 
