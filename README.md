@@ -12,7 +12,8 @@ built for latency.
   matching history lines appear while you type; `Tab`/`Shift-Tab` cycle
   through them. Bash's programmable completion (`complete -F`, e.g. from
   `bash-completion` or `git`) is used on `Tab` for arguments.
-* **History suggestions** as dimmed ghost text after the cursor.
+* **History suggestions** as dimmed ghost text after the cursor; `Right`,
+  `End` or `C-e` accept them, `M-f` / `Ctrl-Right` accept one word.
 * Works with the editing you already have: readline keeps handling every key,
   so undo, the kill ring, `C-r` search, vi mode and bracketed paste all keep
   working.

@@ -14,6 +14,7 @@
 //! | l/e | line point n                             | line changed (insert / edit)         |
 //! | a   | n                                        | new readline call after accept-line  |
 //! | t/T | line point n                             | Tab / Shift-Tab (expects reply)      |
+//! | y/Y | line point n                             | accept suggestion: all / one word    |
 //! | d   | –                                        | bash finished a reply-based hook     |
 //! | g   | n                                        | paint now (from the WINCH trap)      |
 //! | r   | –                                        | signal again later                   |
@@ -449,6 +450,15 @@ impl Daemon {
                         self.on_accept();
                     }
                 }
+                b'y' | b'Y' => {
+                    let line = self.chan.field_str().unwrap_or_default();
+                    let point = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
+                    if self.cmdno_matches() {
+                        self.on_suggest_accept(line, point, ty == b'y');
+                    } else {
+                        self.reply(b"N\0");
+                    }
+                }
                 b't' | b'T' => {
                     let line = self.chan.field_str().unwrap_or_default();
                     let point = self.chan.field_str().unwrap_or_default().trim().parse().unwrap_or(0);
@@ -766,6 +776,74 @@ impl Daemon {
         r.push(0);
         self.reply(&r);
         self.compute_frame();
+    }
+
+    /// Right arrow / End / forward-word at the end of the line: accept the
+    /// history suggestion (whole or one word). The reply leaves the cursor one
+    /// character short so that the readline movement that follows lands at
+    /// the end without ringing the bell.
+    fn on_suggest_accept(&mut self, line: String, point: usize, all: bool) {
+        self.seen_prompt_since_accept = false;
+        let nchars = line.chars().count();
+        if !self.suggestions || self.ps2_mode || line.is_empty() || point != nchars {
+            self.reply(b"N\0");
+            return;
+        }
+        let rest = match self.history.suggest(&line) {
+            Some(s) => s[line.len()..].to_string(),
+            None => {
+                self.reply(b"N\0");
+                return;
+            }
+        };
+        let take: String = if all {
+            rest.clone()
+        } else {
+            // leading blanks, then a run of word characters (or one non-word char)
+            let mut out = String::new();
+            let mut it = rest.chars().peekable();
+            while let Some(&c) = it.peek() {
+                if c == ' ' || c == '\t' {
+                    out.push(c);
+                    it.next();
+                } else {
+                    break;
+                }
+            }
+            let mut took_word = false;
+            while let Some(&c) = it.peek() {
+                if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' {
+                    out.push(c);
+                    it.next();
+                    took_word = true;
+                } else {
+                    break;
+                }
+            }
+            if !took_word {
+                if let Some(c) = it.next() {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        if take.is_empty() {
+            self.reply(b"N\0");
+            return;
+        }
+        let new_line = format!("{line}{take}");
+        let new_point = new_line.chars().count().saturating_sub(1);
+        self.line = new_line.clone();
+        self.point = new_point + 1;
+        self.menu = None;
+        self.frame_valid = false;
+        let mut r = Vec::with_capacity(new_line.len() + 16);
+        r.extend_from_slice(b"I\0");
+        r.extend_from_slice(new_line.as_bytes());
+        r.push(0);
+        r.extend_from_slice(new_point.to_string().as_bytes());
+        r.push(0);
+        self.reply(&r);
     }
 
     // ----- painting -------------------------------------------------------------

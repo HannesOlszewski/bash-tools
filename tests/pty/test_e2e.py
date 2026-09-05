@@ -431,6 +431,35 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
         finally:
             b.close()
 
+    def test_right_arrow_accepts_suggestion(self):
+        b = ENV.bash()
+        try:
+            b.type('echo h')
+            self.assertEqual(b.scr.text(0), '$ echo hello world')   # ghost text
+            b.send('\x1b[C', 0.4)                                   # Right
+            self.assertEqual(b.scr.text(0), '$ echo hello world')
+            self.assertEqual((b.scr.cx, b.scr.cy), (18, 0))
+            self.assertStyle(b, 'hello world', '')                   # real text now
+            self.assertStyle(b, 'echo', GREEN)
+            b.send('\r', 0.4)
+            self.assertEqual(b.scr.text(1), 'hello world')
+            # one word at a time with M-f, then End takes the rest
+            b.type('git ')
+            self.assertEqual(b.scr.text(2), '$ git commit -m x')
+            b.send('\x1bf', 0.4)
+            self.assertEqual((b.scr.cx, b.scr.cy), (12, 2))
+            b.send('\x1b[F', 0.4)
+            self.assertEqual((b.scr.cx, b.scr.cy), (17, 2))
+            self.assertStyle(b, '-m', CYAN)
+            b.send('\x15')
+            # Right in the middle of a line just moves the cursor
+            b.type('ls -la')
+            b.send('\x01\x1b[C', 0.4)
+            self.assertEqual((b.scr.cx, b.scr.cy), (3, 2))
+            self.assertEqual(b.scr.text(2), '$ ls -la')
+        finally:
+            b.close()
+
     def test_daemon_exits_with_shell(self):
         b = ENV.bash()
         try:

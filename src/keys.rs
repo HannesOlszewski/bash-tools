@@ -11,6 +11,8 @@
 //! * `ESC [ 9999 ; 0 ~ <c>`  self-insert of `<c>`
 //! * `ESC [ 9999 ; 1 ~`      insert hook (bind -x)
 //! * `ESC [ 9999 ; 2 ~`      edit hook (bind -x)
+//! * `ESC [ 9999 ; 3 ~`      accept the whole history suggestion (bind -x)
+//! * `ESC [ 9999 ; 4 ~`      accept one word of the suggestion (bind -x)
 //! * `ESC [ 9999 ; 5 ~`      accept-line
 //! * `ESC [ 9999 ; 6 ~`      post-accept hook (bind -x), runs at the start of
 //!                           the next readline call
@@ -18,6 +20,8 @@
 
 pub const HOOK_INSERT: &str = "\\e[9999;1~";
 pub const HOOK_EDIT: &str = "\\e[9999;2~";
+pub const HOOK_SUGGEST_ALL: &str = "\\e[9999;3~";
+pub const HOOK_SUGGEST_WORD: &str = "\\e[9999;4~";
 pub const HOOK_ACCEPT_LINE: &str = "\\e[9999;5~";
 pub const HOOK_POST_ACCEPT: &str = "\\e[9999;6~";
 
@@ -82,6 +86,32 @@ const VI_COMMAND_WRAPPERS: &[(&[&str], &str)] = &[
     (&["\\e[B", "\\eOB"], "next-history"),
 ];
 
+/// Cursor-movement functions that accept the history suggestion first when
+/// the cursor is at the end of the line (like zsh-autosuggestions): the whole
+/// suggestion for forward-char / end-of-line, one word for forward-word.
+/// The hidden numbers start at 200 so they never collide with the wrappers.
+const SUGGEST_WRAPPERS: &[(&[&str], &str, bool)] = &[
+    (&["\\e[C", "\\eOC", "\\C-f"], "forward-char", true),
+    (&["\\e[F", "\\eOF", "\\e[4~", "\\C-e"], "end-of-line", true),
+    (&["\\ef", "\\e[1;5C", "\\e[1;3C"], "forward-word", false),
+];
+const VI_SUGGEST_WRAPPERS: &[(&[&str], &str, bool)] = &[
+    (&["\\e[C", "\\eOC"], "forward-char", true),
+    (&["\\e[F", "\\eOF", "\\e[4~"], "end-of-line", true),
+    (&["\\e[1;5C", "\\e[1;3C"], "forward-word", false),
+];
+
+fn push_suggest_wrappers(s: &mut String, wrappers: &[(&[&str], &str, bool)]) {
+    for (i, (seqs, func, all)) in wrappers.iter().enumerate() {
+        let hidden = format!("\\e[9999;{}~", 200 + i);
+        let hook = if *all { HOOK_SUGGEST_ALL } else { HOOK_SUGGEST_WORD };
+        s.push_str(&format!("\"{hidden}\": {func}\n"));
+        for seq in seqs.iter() {
+            s.push_str(&format!("\"{seq}\": \"{hook}{hidden}{HOOK_EDIT}\"\n"));
+        }
+    }
+}
+
 fn key_literal(b: u8) -> String {
     match b {
         b'"' => "\\\"".into(),
@@ -135,6 +165,7 @@ pub fn inputrc() -> String {
         }
         let w = if keymap == "emacs" { EMACS_WRAPPERS } else { VI_INSERT_WRAPPERS };
         push_wrappers(&mut s, w, 10);
+        push_suggest_wrappers(&mut s, if keymap == "emacs" { SUGGEST_WRAPPERS } else { VI_SUGGEST_WRAPPERS });
         push_accept(&mut s);
         if keymap == "vi-insert" {
             s.push_str("set keymap vi-command\n");
@@ -188,6 +219,9 @@ mod tests {
         assert!(s.contains("\"\\C-?\": \"\\e[9999;10~\\e[9999;2~\"\n"));
         assert!(s.contains("\"\\e[9999;10~\": backward-delete-char\n"));
         assert!(s.contains("\"\\C-m\": \"\\e[9999;5~\\e[9999;6~\"\n"));
+        assert!(s.contains("\"\\e[C\": \"\\e[9999;3~\\e[9999;200~\\e[9999;2~\"\n"));
+        assert!(s.contains("\"\\e[9999;200~\": forward-char\n"));
+        assert!(s.contains("\"\\ef\": \"\\e[9999;4~\\e[9999;202~\\e[9999;2~\"\n"));
         assert!(s.ends_with("$endif\n"));
         assert!(s.contains("$if mode=emacs\nset keymap emacs\n"));
         assert!(s.contains("$if mode=vi\nset keymap vi-insert\n"));

@@ -53,6 +53,8 @@ fi
 bind -m "$__bt_km" -x '"\e[9999;1~": __bt_hook'
 bind -m "$__bt_km" -x '"\e[9999;2~": __bt_ehook'
 bind -m "$__bt_km" -x '"\e[9999;6~": __bt_accept'
+bind -m "$__bt_km" -x '"\e[9999;3~": __bt_sug_all'
+bind -m "$__bt_km" -x '"\e[9999;4~": __bt_sug_word'
 bind -m "$__bt_km" -x '"\C-i": __bt_tab'
 bind -m "$__bt_km" -x '"\e[Z": __bt_stab'
 unset __bt_km
@@ -61,6 +63,8 @@ __bt_hook() { [[ -z $__bt_w ]] || printf 'l\0%s\0%s\0%s\0' "$READLINE_LINE" "$RE
 __bt_ehook() { [[ -z $__bt_w ]] || printf 'e\0%s\0%s\0%s\0' "$READLINE_LINE" "$READLINE_POINT" "$__bt_n" >&"$__bt_w" || :; }
 __bt_accept() { [[ -z $__bt_w ]] || printf 'a\0%s\0' "$__bt_n" >&"$__bt_w" || :; }
 __bt_tab() { __bt_menu t; }
+__bt_sug_all() { __bt_menu y; }
+__bt_sug_word() { __bt_menu Y; }
 __bt_stab() { __bt_menu T; }
 __bt_menu() {
     [[ -n $__bt_w ]] || return 0
