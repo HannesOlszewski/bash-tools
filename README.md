@@ -123,6 +123,25 @@ dependencies.
 * `compopt` inside completion functions is emulated; the `-X` filter option of
   `complete` is ignored.
 
+## Troubleshooting
+
+**Every keystroke prints the line again on a new line** (typically over
+`ssh` from Ghostty, kitty, WezTerm or another terminal whose `TERM` the remote
+host does not know): readline cannot find the `clr_eol` capability for that
+`TERM`, so bash redraws the prompt on a fresh line around every `bind -x`
+hook. bash-tools now refuses to start in that situation and prints a hint.
+Fix it by installing the terminfo entry on the remote host:
+
+```sh
+infocmp -x "$TERM" | ssh HOST -- tic -x -      # once per host
+```
+
+or connect with a known terminal type: `TERM=xterm-256color ssh HOST`.
+
+**Nothing happens at all**: check that `bash-tools` is on `PATH` at the time
+`.bashrc` runs, that the shell is interactive with a terminal on stdin, and run
+`BASH_TOOLS_DEBUG=/tmp/bt.log bash` to get a trace from the daemon.
+
 ## Development
 
 ```sh

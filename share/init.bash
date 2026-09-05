@@ -4,6 +4,27 @@
 (( BASH_VERSINFO[0] >= 5 )) || return 0
 [[ -z ${__bt_r-} && -t 0 && -t 2 ]] || return 0
 [[ -o posix ]] && return 0
+# Without a terminfo entry for $TERM readline cannot clear lines, and bash
+# then prints the prompt on a *new line* around every `bind -x` hook (i.e.
+# after every keystroke). Typical over ssh with TERM=xterm-ghostty/-kitty.
+__bt_terminfo_ok() {
+    [[ -n ${TERM-} ]] || return 1
+    local d h f=${TERM:0:1}
+    printf -v h '%x' "'$f"
+    for d in ${TERMINFO:+"$TERMINFO"} ~/.terminfo ${TERMINFO_DIRS//:/ } /etc/terminfo /lib/terminfo \
+             /usr/share/terminfo /usr/lib/terminfo /usr/local/share/terminfo /usr/share/misc/terminfo; do
+        [[ -e $d/$f/$TERM || -e $d/$h/$TERM ]] && return 0
+    done
+    # not found in the usual places: ask ncurses (a fork, but only on this path)
+    command -v tput >/dev/null 2>&1 || return 0
+    tput el >/dev/null 2>&1
+}
+if ! __bt_terminfo_ok; then
+    printf 'bash-tools: no terminfo entry for TERM=%s; not enabling (install it, e.g. `infocmp -x %s | ssh HOST -- tic -x -`, or use TERM=xterm-256color)\n' "$TERM" "$TERM" >&2
+    unset -f __bt_terminfo_ok
+    return 0
+fi
+unset -f __bt_terminfo_ok
 
 __bt_bin=@BIN@
 [[ -x $__bt_bin ]] || return 0

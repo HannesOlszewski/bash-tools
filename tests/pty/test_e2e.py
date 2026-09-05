@@ -417,6 +417,19 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
         finally:
             b.close()
 
+    def test_unknown_term_bails_out(self):
+        # readline without terminfo redraws on a new line around every
+        # bind -x hook; we must detect that and stay out of the way
+        b = ENV.bash(cols=60, rows=12, env={'TERM': 'xterm-doesnotexist'}, wait='bash-tools:')
+        try:
+            b.type('ls -la')
+            self.assertEqual(b.scr.cy, 1)
+            self.assertEqual(b.scr.text(1), '$ ls -la')
+            b.send('\r', 0.5)
+            self.assertEqual(b.scr.text(1), '$ ls -la')
+        finally:
+            b.close()
+
     def test_daemon_exits_with_shell(self):
         b = ENV.bash()
         try:
