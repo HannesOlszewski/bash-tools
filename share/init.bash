@@ -3,6 +3,7 @@
 [[ $- == *i* ]] || return 0 2>/dev/null
 (( BASH_VERSINFO[0] >= 5 )) || return 0
 [[ -z ${__bt_r-} && -t 0 && -t 2 ]] || return 0
+[[ -o posix ]] && return 0
 
 __bt_bin=@BIN@
 [[ -x $__bt_bin ]] || return 0
@@ -12,7 +13,8 @@ __bt_w= __bt_pid= __bt_busy= __bt_ack= __bt_last_refresh=0 __bt_user_winch= __bt
 # PS0 is expanded once per executed command line, right before it runs: erase
 # the completion list below the prompt and bump a counter that tells the
 # daemon which prompt a message belongs to (no DEBUG trap needed).
-PS0="${PS0-}"'\e[J${__bt_x[__bt_n++]}'
+__bt_x=()
+PS0="${PS0-}"'\e[J${__bt_x[__bt_n++]-}'
 
 # Start the daemon now (a fork only); the handshake happens at the first prompt.
 exec {__bt_r}< <("$__bt_bin" daemon)
@@ -34,9 +36,9 @@ bind -m "$__bt_km" -x '"\C-i": __bt_tab'
 bind -m "$__bt_km" -x '"\e[Z": __bt_stab'
 unset __bt_km
 
-__bt_hook() { [[ -n $__bt_w ]] && printf 'l\0%s\0%s\0%s\0' "$READLINE_LINE" "$READLINE_POINT" "$__bt_n" >&"$__bt_w"; }
-__bt_ehook() { [[ -n $__bt_w ]] && printf 'e\0%s\0%s\0%s\0' "$READLINE_LINE" "$READLINE_POINT" "$__bt_n" >&"$__bt_w"; }
-__bt_accept() { [[ -n $__bt_w ]] && printf 'a\0%s\0' "$__bt_n" >&"$__bt_w"; }
+__bt_hook() { [[ -z $__bt_w ]] || printf 'l\0%s\0%s\0%s\0' "$READLINE_LINE" "$READLINE_POINT" "$__bt_n" >&"$__bt_w" || :; }
+__bt_ehook() { [[ -z $__bt_w ]] || printf 'e\0%s\0%s\0%s\0' "$READLINE_LINE" "$READLINE_POINT" "$__bt_n" >&"$__bt_w" || :; }
+__bt_accept() { [[ -z $__bt_w ]] || printf 'a\0%s\0' "$__bt_n" >&"$__bt_w" || :; }
 __bt_tab() { __bt_menu t; }
 __bt_stab() { __bt_menu T; }
 __bt_menu() {
@@ -51,7 +53,7 @@ __bt_menu() {
             break ;;
         C)  # the daemon wants the compspec of a command
             IFS= read -r -d '' -u "$__bt_r" -t 5 reply
-            { printf 'S\0'; complete -p -- "$reply" 2>/dev/null || complete -p -D 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+            { printf 'S\0'; complete -p -- "$reply" 2>/dev/null || complete -p -D 2>/dev/null || :; printf '\0'; } >&"$__bt_w" ;;
         R)  __bt_compspec ;;
         *)  break ;;
         esac
@@ -92,14 +94,13 @@ __bt_compspec() {
             done
             return 0
         }
-        "$arg" "$cmd" "$cur" "$prev" 2>/dev/null
-        st=$?
+        if "$arg" "$cmd" "$cur" "$prev" 2>/dev/null; then st=0; else st=$?; fi
         unset -f compopt
         { printf 'Q\0%s\0%s\0' "$st" "$__bt_compopts"; (( ${#COMPREPLY[@]} )) && printf '%s\n' "${COMPREPLY[@]}"; printf '\0'; } >&"$__bt_w" ;;
-    W)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -W "$arg" -- "$cur" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
-    A)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -A "$arg" -- "$cur" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
-    G)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -G "$arg" 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
-    C)  { printf 'Q\0%s\0%s\0' 0 ''; eval "$arg" '"$cmd" "$cur" "$prev"' 2>/dev/null; printf '\0'; } >&"$__bt_w" ;;
+    W)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -W "$arg" -- "$cur" 2>/dev/null || :; printf '\0'; } >&"$__bt_w" ;;
+    A)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -A "$arg" -- "$cur" 2>/dev/null || :; printf '\0'; } >&"$__bt_w" ;;
+    G)  { printf 'Q\0%s\0%s\0' 0 ''; compgen -G "$arg" 2>/dev/null || :; printf '\0'; } >&"$__bt_w" ;;
+    C)  { printf 'Q\0%s\0%s\0' 0 ''; eval "$arg" '"$cmd" "$cur" "$prev"' 2>/dev/null || :; printf '\0'; } >&"$__bt_w" ;;
     *)  printf 'Q\0%s\0%s\0\0' 1 '' >&"$__bt_w" ;;
     esac
     return 0
@@ -109,10 +110,10 @@ __bt_compspec() {
 # the signal (redrawing the line) before this trap runs, so our paint stays.
 __bt_winch() {
     if [[ -n $__bt_busy ]]; then
-        printf 'r\0' >&"$__bt_w"
+        printf 'r\0' >&"$__bt_w" || :
     elif [[ -n $__bt_w ]]; then
-        printf 'g\0%s\0' "$__bt_n" >&"$__bt_w"
-        read -r -N 2 -u "$__bt_r" -t 2 __bt_ack
+        printf 'g\0%s\0' "$__bt_n" >&"$__bt_w" || :
+        read -r -N 2 -u "$__bt_r" -t 2 __bt_ack || __bt_ack=
     fi
     # the user's own WINCH trap only for real resizes, not for our paints
     [[ -n $__bt_user_winch && $__bt_ack != ?m ]] && eval "$__bt_user_winch"
@@ -134,12 +135,12 @@ __bt_connect() {
     # Chain an existing WINCH trap: capturing `trap -p` output in the shell
     # costs a fork (or 0.3 ms in 5.3), so let the daemon parse it instead.
     { printf 'W\0'; trap -p WINCH; printf '\0'; } >&"$__bt_w"
-    IFS= read -r -d '' -u "$__bt_r" -t 5 __bt_user_winch
+    IFS= read -r -d '' -u "$__bt_r" -t 5 __bt_user_winch || __bt_user_winch=
     trap '__bt_winch' WINCH
     return 0
 }
 __bt_refresh() {
-    { printf 'A\0'; compgen -A alias; printf '\0F\0'; compgen -A function; printf '\0'; } >&"$__bt_w"
+    { printf 'A\0'; compgen -A alias || :; printf '\0F\0'; compgen -A function || :; printf '\0'; } >&"$__bt_w"
 }
 __bt_disable() {
     [[ -n $__bt_w ]] && printf 'x\0' >&"$__bt_w"
@@ -172,7 +173,7 @@ __bt_prompt() {
     fi
     printf 'p\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' "$ps1" "$ps2" "$PWD" "$PATH" "$n" "$__bt_n" "${COMP_WORDBREAKS-}" >&"$__bt_w"
     if (( HISTCMD > 1 )); then
-        { printf 'H\0'; fc -ln -1 2>/dev/null; printf '\0'; } >&"$__bt_w"
+        { printf 'H\0'; fc -ln -1 2>/dev/null || :; printf '\0'; } >&"$__bt_w"
     fi
     if (( EPOCHSECONDS - __bt_last_refresh >= 5 )); then
         __bt_last_refresh=$EPOCHSECONDS
@@ -183,7 +184,7 @@ __bt_prompt() {
 
 # Hook into PROMPT_COMMAND (string or array). The WINCH trap is installed at
 # the first prompt, once the daemon is connected.
-if [[ ${PROMPT_COMMAND@a} == *a* ]]; then
+if [[ -n ${PROMPT_COMMAND+x} && ${PROMPT_COMMAND@a} == *a* ]]; then
     PROMPT_COMMAND+=(__bt_prompt)
 else
     PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}__bt_prompt"
