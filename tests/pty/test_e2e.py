@@ -5,7 +5,7 @@ a pseudo terminal and check what ends up on the (emulated) screen.
 Run: python3 tests/pty/test_e2e.py   (uses target/release/bash-tools, or
 $BASH_TOOLS_BIN)
 """
-import os, sys, time, signal, subprocess, tempfile, unittest, shutil
+import os, re, sys, time, signal, subprocess, tempfile, unittest, shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -459,6 +459,84 @@ foo() { :; }; bar() { :; }; lazycmd() { :; }
             self.assertEqual(b.scr.text(2), '$ ls -la')
         finally:
             b.close()
+
+    def snapshot(self):
+        """`bash-tools init > file`: stdout is a real file, so the snapshot
+        gets the staleness guard baked in (the piped form does not)."""
+        d = tempfile.mkdtemp(prefix='bt-snap-', dir=ENV.dir)
+        p = os.path.join(d, 'init.bash')
+        env = dict(os.environ, XDG_CACHE_HOME=ENV.cache, HOME=ENV.dir)
+        with open(p, 'w') as f:
+            subprocess.run([BIN, 'init', '--bin', BIN], env=env, stdout=f, check=True)
+        return p
+
+    def test_snapshot_has_guard_and_piped_does_not(self):
+        with open(self.snapshot()) as f:
+            snap = f.read()
+        self.assertIn('-nt', snap)
+        self.assertNotIn('@STALE_CHECK@', snap)
+        # the form ENV uses (captured stdout = a pipe) must stay guard-free
+        with open(ENV.init) as f:
+            self.assertNotIn('-nt', f.read())
+
+    def test_stale_snapshot_warns(self):
+        p = self.snapshot()
+        rc = os.path.join(os.path.dirname(p), 'rc.bash')
+        with open(rc, 'w') as f:
+            f.write("PS1='$ '\nsource %s\n" % p)
+        e = {'HOME': ENV.dir, 'XDG_CACHE_HOME': ENV.cache, 'HISTFILE': ENV.hist}
+
+        def out(env):
+            # the raw stream, not the screen: the warning wraps at 80 columns
+            b = Bash(rc, env=env)
+            try:
+                self.assertTrue(b.wait_for('$'))
+                b.drain(0.3)
+                return b.raw.decode('utf-8', 'replace'), b
+            except Exception:
+                b.close()
+                raise
+
+        # fresh snapshot (newer than the binary): silent
+        s, b = out(e)
+        try:
+            self.assertNotIn('stale', s)
+        finally:
+            b.close()
+
+        # back-date it behind the binary: warns, and the shell still works
+        old = os.path.getmtime(BIN) - 60
+        os.utime(p, (old, old))
+        s, b = out(e)
+        try:
+            self.assertIn('the cached snippet is stale', s)
+            self.assertIn('bash-tools init > %s' % p, s)
+            b.type('echo ok')
+            b.send('\r', 0.4)
+            self.assertIn('ok', b.scr.dump())
+        finally:
+            b.close()
+
+        # silenced by the documented opt-out
+        s, b = out(dict(e, BASH_TOOLS_OPTS='nostalecheck'))
+        try:
+            self.assertNotIn('stale', s)
+        finally:
+            b.close()
+
+    def test_inputrc_named_by_content(self):
+        env = dict(os.environ, XDG_CACHE_HOME=ENV.cache, HOME=ENV.dir)
+        out = subprocess.run([BIN, 'init', '--bin', BIN], env=env,
+                             capture_output=True, text=True, check=True).stdout
+        m = re.search(r'bind -f (\S+)', out)
+        self.assertIsNotNone(m, out)
+        path = m.group(1).strip("'")
+        self.assertRegex(os.path.basename(path), r'^keys-[0-9a-f]{16}\.inputrc$')
+        self.assertTrue(os.path.exists(path))
+        # the name is a function of the content
+        with open(path) as f:
+            self.assertEqual(f.read(), subprocess.run(
+                [BIN, 'inputrc'], env=env, capture_output=True, text=True, check=True).stdout)
 
     def test_daemon_exits_with_shell(self):
         b = ENV.bash()

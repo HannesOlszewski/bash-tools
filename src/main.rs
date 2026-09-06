@@ -31,7 +31,7 @@ COMMANDS:
 CONFIGURATION (shell variables, set before sourcing):
     BASH_TOOLS_STYLES='command=fg=green,bold;path=underline;...'
     BASH_TOOLS_LIST_ROWS=8      rows reserved below the prompt for the list
-    BASH_TOOLS_OPTS=nolist,nosuggest
+    BASH_TOOLS_OPTS=nolist,nosuggest,nostalecheck
 ";
 
 fn main() {
@@ -89,8 +89,11 @@ fn cmd_init(args: &[String]) {
             .unwrap_or_else(|| "bash-tools".into())
     });
     let dir = cache_dir();
-    let inputrc_path = dir.join(format!("keys-{}.inputrc", env!("CARGO_PKG_VERSION")));
+    // Named by content, not by version: the version is bumped per release, but
+    // the bindings change per build, so a version-keyed name silently reuses a
+    // stale file after `cargo install` from a dev checkout.
     let content = keys::inputrc();
+    let inputrc_path = dir.join(format!("keys-{:016x}.inputrc", fnv1a(content.as_bytes())));
     let current = std::fs::read_to_string(&inputrc_path).ok();
     if current.as_deref() != Some(content.as_str()) {
         if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&inputrc_path, &content)) {
@@ -98,8 +101,37 @@ fn cmd_init(args: &[String]) {
             std::process::exit(1);
         }
     }
-    let script = keys::init_script(&bin, &inputrc_path.to_string_lossy());
+    // `bash-tools init > file` leaves fd 1 a regular file and tells us where the
+    // snapshot lands; `eval "$(bash-tools init)"` leaves it a pipe.
+    let self_path = stdout_file_path();
+    let script = keys::init_script(&bin, &inputrc_path.to_string_lossy(), self_path.as_deref());
     let _ = std::io::stdout().write_all(script.as_bytes());
+}
+
+/// FNV-1a. Only used to name a cache file, so speed and size beat quality.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The path stdout is redirected to, if it is a regular file.
+fn stdout_file_path() -> Option<String> {
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(1, &mut st) != 0 || st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return None;
+        }
+    }
+    let p = std::fs::read_link("/proc/self/fd/1").ok()?;
+    if p.is_absolute() && p.exists() {
+        Some(p.to_string_lossy().into_owned())
+    } else {
+        None
+    }
 }
 
 fn cmd_highlight(args: &[String]) {

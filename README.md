@@ -32,14 +32,21 @@ Then, at the **end** of `~/.bashrc`:
 eval "$(bash-tools init)"
 ```
 
-For the fastest possible startup, cache the snippet (it is static per
-version) and source the file instead of running the binary at every start:
+For the fastest possible startup, cache the snippet and source the file instead
+of running the binary at every start:
 
 ```sh
 mkdir -p ~/.cache/bash-tools && bash-tools init > ~/.cache/bash-tools/init.bash
 # in ~/.bashrc:
 source ~/.cache/bash-tools/init.bash
 ```
+
+The snapshot is static per **build**, not per release: rerun that first command
+after every upgrade (`cargo install`, a package update, a rebuild from a
+checkout), or the shell keeps loading the old key bindings. A cached snapshot
+notices this itself. It compares its own timestamp against the binary's at
+startup (two `stat`s, no fork) and prints a hint telling you to regenerate; set
+`BASH_TOOLS_OPTS=nostalecheck` to silence it.
 
 Turn it off in a running shell with `bash_tools_off`.
 
@@ -51,7 +58,7 @@ Set these **before** sourcing the snippet.
 |---|---|---|
 | `BASH_TOOLS_STYLES` | style overrides, `name=style;name=style` (see below) | none |
 | `BASH_TOOLS_LIST_ROWS` | rows reserved below the prompt for the completion list (`0` disables the list) | `8` |
-| `BASH_TOOLS_OPTS` | comma-separated: `nolist` (no live list), `nosuggest` (no history ghost text) | none |
+| `BASH_TOOLS_OPTS` | comma-separated: `nolist` (no live list), `nosuggest` (no history ghost text), `nostalecheck` (no stale-snapshot warning) | none |
 
 Style names follow `zsh-syntax-highlighting` where they exist:
 `command`, `unknown-command`, `builtin`, `alias`, `function`,
@@ -138,6 +145,19 @@ infocmp -x "$TERM" | ssh HOST -- tic -x -      # once per host
 ```
 
 or connect with a known terminal type: `TERM=xterm-256color ssh HOST`.
+
+**A feature from a newer version does not work** (a key does nothing, a
+binding is missing): if `.bashrc` sources a cached `init.bash`, upgrading the
+binary does not update it, because nothing reruns `bash-tools init`. Regenerate
+the snapshot and start a new shell:
+
+```sh
+bash-tools init > ~/.cache/bash-tools/init.bash
+```
+
+Both files have to come from the same build; regenerating only the key bindings
+leaves macros pointing at hooks the old snippet never bound. One `bash-tools
+init` writes both.
 
 **Nothing happens at all**: check that `bash-tools` is on `PATH` at the time
 `.bashrc` runs, that the shell is interactive with a terminal on stdin, and run

@@ -28,6 +28,10 @@ unset -f __bt_terminfo_ok
 
 __bt_bin=@BIN@
 [[ -x $__bt_bin ]] || return 0
+# When this file is a cached snapshot (`bash-tools init > file`), upgrading the
+# binary leaves it behind: nothing re-runs `bash-tools init`. Two stats, no
+# fork. Only emitted for the snapshot form; the `eval` form cannot go stale.
+@STALE_CHECK@
 __bt_rows=${BASH_TOOLS_LIST_ROWS:-8}
 __bt_w= __bt_pid= __bt_busy= __bt_ack= __bt_last_refresh=0 __bt_user_winch= __bt_n=0 __bt_nl=
 

@@ -182,7 +182,10 @@ const INIT_TEMPLATE: &str = include_str!("../share/init.bash");
 
 /// The bash snippet to `source`/`eval`. Comment lines (except the header)
 /// and blank lines are dropped: bash still has to lex them at every start.
-pub fn init_script(bin: &str, inputrc_path: &str) -> String {
+///
+/// `self_path` is the file the snippet is being written to, when it is being
+/// written to one; that turns on the staleness guard (see [`stale_check`]).
+pub fn init_script(bin: &str, inputrc_path: &str, self_path: Option<&str>) -> String {
     let mut out = String::with_capacity(INIT_TEMPLATE.len());
     for (i, line) in INIT_TEMPLATE.lines().enumerate() {
         let t = line.trim_start();
@@ -192,9 +195,31 @@ pub fn init_script(bin: &str, inputrc_path: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out.replace("@BIN@", &shell_quote(bin))
+    let check = match self_path {
+        Some(p) => format!("{}\n", stale_check(p)),
+        None => String::new(),
+    };
+    out.replace("@STALE_CHECK@\n", &check)
+        .replace("@BIN@", &shell_quote(bin))
         .replace("@INPUTRC@", &shell_quote(inputrc_path))
         .replace("@VERSION@", env!("CARGO_PKG_VERSION"))
+}
+
+/// The one-line staleness guard baked into a cached snapshot: warn when the
+/// binary is newer than the snapshot, i.e. an upgrade happened but nobody
+/// re-ran `bash-tools init`. `[[ -nt ]]` is a builtin (two stats, ~1 us), and
+/// the `if` form keeps the snippet's exit status 0 under `set -e`.
+fn stale_check(self_path: &str) -> String {
+    let p = shell_quote(self_path);
+    // Three short lines rather than one long one: the path alone is ~50 columns,
+    // and a wrapped warning at every prompt is hard to read. Shown once per
+    // upgrade, until the snapshot is regenerated.
+    format!(
+        "if [[ $__bt_bin -nt {p} && ${{BASH_TOOLS_OPTS-}} != *nostalecheck* ]]; then \
+         printf 'bash-tools: the cached snippet is stale (the binary was upgraded after it \
+         was written)\\n  regenerate: bash-tools init > %s\\n  silence:    \
+         BASH_TOOLS_OPTS=nostalecheck\\n' {p} >&2; fi"
+    )
 }
 
 pub fn shell_quote(s: &str) -> String {
@@ -239,9 +264,33 @@ mod tests {
 
     #[test]
     fn init_has_no_placeholders() {
-        let s = init_script("/x/bash-tools", "/y/keys.inputrc");
+        let s = init_script("/x/bash-tools", "/y/keys.inputrc", None);
         assert!(!s.contains('@') || !s.contains("@BIN@"));
         assert!(s.contains("/x/bash-tools"));
         assert!(s.contains("/y/keys.inputrc"));
+        assert!(!s.contains("@STALE_CHECK@"));
+    }
+
+    #[test]
+    fn stale_check_only_for_snapshots() {
+        // the `eval` form has no destination file, so no guard and no blank line
+        let piped = init_script("/x/bash-tools", "/y/keys.inputrc", None);
+        assert!(!piped.contains("-nt"));
+        assert!(!piped.contains("\n\n"));
+
+        let snap = init_script("/x/bash-tools", "/y/keys.inputrc", Some("/c/init.bash"));
+        assert!(!snap.contains("@STALE_CHECK@"));
+        assert!(snap.contains("if [[ $__bt_bin -nt /c/init.bash &&"));
+        assert!(snap.contains("nostalecheck"));
+        // the guard sits after __bt_bin is known to exist
+        let bin_at = snap.find("[[ -x $__bt_bin ]] || return 0").unwrap();
+        assert!(snap.find("-nt /c/init.bash").unwrap() > bin_at);
+    }
+
+    #[test]
+    fn stale_check_quotes_odd_paths() {
+        let s = stale_check("/c/a b/init'x.bash");
+        assert!(s.contains("'/c/a b/init'\\''x.bash'"));
+        assert!(!s.contains("@"));
     }
 }
